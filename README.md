@@ -23,7 +23,7 @@ Released under the Creative Commons Attribution 4.0 International License (CC BY
 
 If you reuse my work, please include a note like:
 
-> Article originally written by [Stefano Bassetto](https://github.com/stefanobassetto) — Licensed under CC BY 4.0.
+> Article originally written by [Stefano Bassetto](https://github.com/nephilimdie) — Licensed under CC BY 4.0.
 
 ---
 
