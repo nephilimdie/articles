@@ -141,8 +141,8 @@ Refactors
 ## 📦 Versioning Strategy (SemVer)
 
 AgileFlow follows Semantic Versioning to maintain clarity and predictability in version changes. Every merge into master triggers a pipeline that evaluates the nature of the change based on:
-The type of branch merged (feature, hotfix, release)
-The presence of BREAKING CHANGE: in commit messages
+- The type of branch merged (feature, hotfix, release)
+- The presence of BREAKING CHANGE: in commit messages
 
 ### Rules
 
