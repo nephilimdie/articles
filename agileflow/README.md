@@ -106,17 +106,18 @@ refactor(cart): extract calculator method
 ```
 
 ## Release Notes Automation
-Automated release notes are one of AgileFlow's most valuable features. By adhering to naming conventions and structured commits, teams can generate clear and human-readable changelogs without manual effort.
+
+Automated release notes are one of AgileFlow's most valuable features. By adhering to naming conventions and structured commits, teams can generate clear and human-readable changelogs without manual effort.  
 The CI pipeline collects metadata from merged branches and commits to build categorized release notes. These notes can be published in CHANGELOG.md, used for GitHub/GitLab releases, or integrated into dashboards.
 
-Key benefits:
+**Key benefits:**
 
 - Fully automated from developer input (no extra work)
 - Includes ticket IDs, titles, and scope of change
 - Categorizes changes into Features, Fixes, Refactors, etc.
 - Helps QA and PMs track progress and impact
 
-Supported sources:
+**Supported sources:**
 
 - Branch names following feature/, task/, bugfix/, hotfix/, and release/ naming patterns
 - Conventional commit messages with clear scope
@@ -153,22 +154,23 @@ AgileFlow follows Semantic Versioning to maintain clarity and predictability in 
 | Bugfix              | `hotfix/`              | PATCH ↑                |
 
 ### Example
-- Merging feature/1001_checkout → master → 1.2.0
-- Merging hotfix/3456_login_error → master → 1.2.1
-- Merging with BREAKING CHANGE: in commit → 2.0.0
+
+- Merging feature/1001_checkout → master → 1.2.0  
+- Merging hotfix/3456_login_error → master → 1.2.1  
+- Merging with BREAKING CHANGE: in commit → 2.0.0  
 
 All tags are automatically created using GitHub Actions.
 
 ## How This Enables Agile Teams
 
-AgileFlow was designed to remove friction between developers, QA, and product managers. It brings together clarity (via structured branch names), traceability (via conventional commits), and automation (via CI workflows).
+AgileFlow was designed to remove friction between developers, QA, and product managers. It brings together clarity (via structured branch names), traceability (via conventional commits), and automation (via CI workflows).  
 By structuring branches around actual deliverables (tasks, features, fixes), it aligns better with Agile rituals such as sprint planning, grooming, QA testing, and demos.
 
-Benefits include:
+**Benefits include:**
 
-- Smaller PRs and faster reviews
-- Clear visibility of what gets released
-- Precise targeting of what to test
+- Smaller PRs and faster reviews  
+- Clear visibility of what gets released  
+- Precise targeting of what to test  
 - Easy rollback via task-based history
 
 ## Tooling & Compatibility
