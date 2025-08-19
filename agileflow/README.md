@@ -60,7 +60,7 @@ A `hotfix/*` is created directly from `master` to quickly resolve a production i
 - Minimal disruption to ongoing development
 - Clear isolation of emergency fixes
 
-### 🚀 3. Release Workflow
+### 3. Release Workflow
 
 The `release/*` branch acts as a staging area for upcoming versions. It collects tested and verified `feature/*` and `hotfix/*` branches and allows QA to validate the full release before deployment.
 
@@ -139,7 +139,7 @@ Refactors
 - [12347] Simplified cart logic
 ```
 
-## 📦 Versioning Strategy (SemVer)
+## Versioning Strategy (SemVer)
 
 AgileFlow follows Semantic Versioning to maintain clarity and predictability in version changes. Every merge into master triggers a pipeline that evaluates the nature of the change based on:
 - The type of branch merged (feature, hotfix, release)
