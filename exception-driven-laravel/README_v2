@@ -1,0 +1,996 @@
+# Exception-Driven Application Flow in PHP (Laravel & Symfony)
+
+## 0. Front Matter
+
+### Title
+
+Exception-Driven Application Flow in PHP (Laravel & Symfony)
+
+### Audience
+
+This document is intended for senior backend developers, tech leads, and software architects working with medium-to-large PHP codebases (Laravel and/or Symfony). It assumes familiarity with modern PHP (>=8.1), OOP, SOLID principles, and layered application architectures.
+
+### Scope
+
+This document defines:
+
+* a complete architectural model for error handling
+* strict, non-negotiable rules
+* a reference implementation approach
+
+covering HTTP APIs, CLI commands, and extensible transports (gRPC, async workers).
+
+### Non-goals
+
+This document does not:
+
+* replace framework documentation
+* enforce a specific domain style (DDD on/off)
+* describe observability stacks (ELK, OTEL)
+
+---
+
+## 1. Introduction
+
+This architecture was introduced to solve a concrete and recurring problem in backend teams: **error handling spreads everywhere and slowly contaminates business logic**.
+
+In real-world codebases, developers are constantly forced to answer questions unrelated to the business domain:
+
+* Should execution stop here?
+* Which HTTP / exit / protocol status should be returned?
+* What message should the client see?
+* How should this be logged?
+* Should this message be translated?
+* Is this an error, a warning, or an expected outcome?
+
+When these decisions are made locally, repeatedly, inside controllers and services, the result is predictable: inconsistent APIs, duplicated payloads, fragile clients, noisy logs, and domain code polluted by transport concerns.
+
+The core idea of this architecture is simple and pragmatic:
+
+**move all error policy out of the core logic and enforce it at the boundary**.
+
+Developers focus on *meaning* (what is valid, what is not, what must never happen). Everything else—logging, translation, serialization, protocol mapping—is centralized and enforced consistently.
+
+---
+
+## 2. Abstract
+
+Modern backend applications require predictable error handling, stable contracts, and a clean separation between domain logic and transport concerns. In many PHP applications, error handling degenerates into boolean returns, ad-hoc arrays, scattered abort calls, duplicated JSON payloads, and inconsistent status codes.
+
+This document describes an **Exception-Driven Application Flow** where abnormal states are modeled as **semantic exceptions** and translated at the application boundary into **structured responses**.
+
+The approach enforces:
+
+* explicit error modeling
+* a stable `response_code` as business contract
+* centralized logging with severity levels
+* single-point translation (i18n)
+* deterministic testing strategies
+
+The guiding principle is:
+
+**the domain throws meaning; the boundary translates meaning**.
+
+---
+
+## 3. Core Principles (Non-Negotiable)
+
+### 3.1 Exception ≠ Control Flow
+
+Exceptions represent **abnormal states or boundary outcomes**, not alternative execution paths. They must never replace conditional branching or be used for normal flow control.
+
+Valid uses include authorization failures, invalid input, invariant violations, and impossible states. If the caller can continue execution meaningfully, an exception is the wrong tool.
+
+### 3.2 Assertion ≠ Business Decision
+
+Assertions protect invariants and fail fast. They must never encode reversible business decisions or optional paths.
+
+### 3.3 Boundary Owns Policy
+
+The domain does not decide:
+
+* HTTP status codes
+* exit codes
+* client messages
+* logging strategies
+
+All policy decisions belong to the application boundary.
+
+### 3.4 Stable Contracts > Messages
+
+Messages are for humans and change over time. Contracts are for machines and must remain stable. Clients must rely on contracts, not on messages.
+
+---
+
+## 4. Exception-Driven Flow (Conceptual)
+
+The conceptual flow is:
+
+1. The domain evaluates a rule
+2. A rule violation produces a semantic failure
+3. The failure is expressed as a typed exception
+4. The exception propagates to the boundary
+5. The boundary normalizes meaning, applies policy, and produces output
+
+No intermediate handling is allowed unless explicit recovery is possible.
+
+---
+
+## 5. `response_code` as Business Contract
+
+Every error exposes a stable, machine-readable identifier called `response_code`.
+
+Rules:
+
+* stable over time
+* unique within its domain
+* language-independent
+* not derived from messages
+* independent from transport
+
+HTTP status codes are too coarse and contextual to represent business meaning.
+
+---
+
+## 6. ErrorCode Design (Domain-Scoped Enums)
+
+A single global error enum does not scale. Each domain owns its own error codes.
+
+The core idea is:
+
+* each domain defines its own enum (VideoErrorCode, UserErrorCode, BillingErrorCode, ...)
+* all enums implement a shared interface (`ErrorCodeInterface`)
+* the enum also defines transport mappings (HTTP / CLI / gRPC) so that the mapping is versioned together with the business meaning
+
+### Interface
+
+```php
+<?php
+
+declare(strict_types=1);
+
+interface ErrorCodeInterface
+{
+    /**
+     * Stable business identifier (API contract).
+     */
+    public function value(): string;
+
+    /**
+     * Translation key used by the boundary.
+     */
+    public function translationKey(): string;
+
+    /**
+     * Transport mappings.
+     */
+    public function httpStatus(): int;
+    public function cliExitCode(): int;
+    public function grpcStatus(): int;
+}
+```
+
+### Example: Video domain enum
+
+```php
+<?php
+
+declare(strict_types=1);
+
+enum VideoErrorCode: string implements ErrorCodeInterface
+{
+    case THUMBNAIL_INVALID_DIMENSIONS = 'VIDEO_THUMBNAIL_INVALID_DIMENSIONS';
+    case VIDEO_NOT_FOUND = 'VIDEO_NOT_FOUND';
+
+    public function value(): string
+    {
+        return $this->value;
+    }
+
+    public function translationKey(): string
+    {
+        return match ($this) {
+            self::THUMBNAIL_INVALID_DIMENSIONS => 'errors.video.thumbnail_invalid_dimensions',
+            self::VIDEO_NOT_FOUND => 'errors.video.not_found',
+        };
+    }
+
+    public function httpStatus(): int
+    {
+        return match ($this) {
+            self::THUMBNAIL_INVALID_DIMENSIONS => 422,
+            self::VIDEO_NOT_FOUND => 404,
+        };
+    }
+
+    public function cliExitCode(): int
+    {
+        return match ($this) {
+            self::THUMBNAIL_INVALID_DIMENSIONS => 2,
+            self::VIDEO_NOT_FOUND => 3,
+        };
+    }
+
+    public function grpcStatus(): int
+    {
+        // Example mapping: 3=INVALID_ARGUMENT, 5=NOT_FOUND (gRPC status codes)
+        return match ($this) {
+            self::THUMBNAIL_INVALID_DIMENSIONS => 3,
+            self::VIDEO_NOT_FOUND => 5,
+        };
+    }
+}
+```
+
+Notes:
+
+* keeping mappings in the enum prevents duplicated “code → transport mapping” tables scattered in handlers
+* `translationKey()` is stable; the translated text is not
+
+---
+
+## 7. ApiException Base Class
+
+`ApiException` is the semantic base class. Concrete exceptions should:
+
+* declare an error code (domain enum)
+* declare the log level (PSR-3)
+* optionally provide structured context and safe public metadata
+
+`ApiException` should *not* contain any transport or presentation behavior.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Psr\Log\LogLevel;
+
+abstract class ApiException extends Exception
+{
+    /**
+     * Each exception must map to a domain-owned error code.
+     */
+    abstract public static function code(): ErrorCodeInterface;
+
+    /**
+     * PSR-3 severity. Concrete exceptions override via constant.
+     */
+    public const LOG_LEVEL = LogLevel::ERROR;
+
+    final public function codeEnum(): ErrorCodeInterface
+    {
+        return static::code();
+    }
+
+    final public function logLevel(): string
+    {
+        return static::LOG_LEVEL;
+    }
+
+    /**
+     * Extra structured info for logs (internal).
+     *
+     * @return array<string,mixed>
+     */
+    public function context(): array
+    {
+        return [];
+    }
+
+    /**
+     * Extra structured info safe for clients.
+     *
+     * @return array<string,mixed>
+     */
+    public function publicMeta(): array
+    {
+        return [];
+    }
+}
+```
+
+---
+
+## 8. Domain Exceptions (Examples)
+
+Domain exceptions represent specific, semantic failure cases. Each exception class must be precise, explicit, and owned by the domain that defines the rule.
+
+### Authorization example
+
+```php
+final class UserNotAuthorizedException extends ApiException
+{
+    public const LOG_LEVEL = LogLevel::NOTICE;
+
+    public static function code(): ErrorCodeInterface
+    {
+        return UserErrorCode::NOT_AUTHORIZED;
+    }
+}
+```
+
+### Validation-like example
+
+```php
+final class ThumbnailInvalidDimensionsException extends ApiException
+{
+    public const LOG_LEVEL = LogLevel::INFO;
+
+    public function __construct(
+        private int $width,
+        private int $height
+    ) {
+        parent::__construct('Invalid thumbnail dimensions');
+    }
+
+    public static function code(): ErrorCodeInterface
+    {
+        return VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS;
+    }
+
+    public function publicMeta(): array
+    {
+        return ['width' => $this->width, 'height' => $this->height];
+    }
+}
+```
+
+These exceptions encode meaning only; no transport logic is present.
+
+---
+
+## 9. Assertions
+
+Assertions protect invariants and remove defensive branching from domain logic. They must fail fast and never attempt recovery.
+
+```php
+final class VideoAssertions
+{
+    public static function thumbnailIsLargeEnough(int $width, int $height): void
+    {
+        if ($width < 640 || $height < 360) {
+            throw new ThumbnailInvalidDimensionsException($width, $height);
+        }
+    }
+}
+```
+
+Assertions make invariants explicit, self-documenting, and trivially testable.
+
+---
+
+## 10. ErrorEnvelope
+
+The `ErrorEnvelope` is the internal, canonical representation of an error. All transports operate from this model.
+
+It contains:
+
+* the semantic error code (business contract)
+* the resolved, translated message (human-facing)
+* the severity level (PSR-3)
+* public metadata (safe for clients)
+* structured logging context (internal-only)
+
+This guarantees a single source of truth for error handling.
+
+### Reference implementation
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class ErrorEnvelope
+{
+    /**
+     * @param array<string,mixed> $meta
+     * @param array<string,mixed> $logContext
+     */
+    public function __construct(
+        public readonly ErrorCodeInterface $code,
+        public readonly string $message,
+        public readonly string $logLevel,
+        public readonly array $meta = [],
+        public readonly array $logContext = [],
+    ) {}
+
+    public function responseCode(): string
+    {
+        return $this->code->value();
+    }
+}
+```
+
+### Notes
+
+* `meta` must contain only client-safe information (no stack traces, no SQL, no internal identifiers unless explicitly allowed).
+* `logContext` is meant for structured logs and debugging. Keep it stable and machine-readable.
+* `message` should come from translation at the boundary (adapter), not from the exception message.
+
+---
+
+## 11. ErrorAdapter
+
+The ErrorAdapter converts any `Throwable` into an `ErrorEnvelope`.
+
+Responsibilities:
+
+* extract `ErrorCodeInterface` from `ApiException`
+* apply fallback codes for unknown exceptions
+* resolve translations
+* collect structured logging context
+
+Unknown exceptions are treated as `INTERNAL_ERROR` by default.
+
+### Adapter interface
+
+```php
+<?php
+
+declare(strict_types=1);
+
+interface ErrorAdapterInterface
+{
+    public function toEnvelope(Throwable $e): ErrorEnvelope;
+}
+```
+
+### Default adapter (reference implementation)
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Psr\Log\LogLevel;
+
+final class DefaultErrorAdapter implements ErrorAdapterInterface
+{
+    public function __construct(
+        private readonly TranslationResolverInterface $translator,
+        private readonly ErrorCodeInterface $internalErrorCode,
+    ) {}
+
+    public function toEnvelope(Throwable $e): ErrorEnvelope
+    {
+        if ($e instanceof ApiException) {
+            $code = $e->codeEnum();
+
+            return new ErrorEnvelope(
+                code: $code,
+                message: $this->translator->translate($code->translationKey()),
+                logLevel: $e->logLevel(),
+                meta: $e->publicMeta(),
+                logContext: $e->context(),
+            );
+        }
+
+        // Fallback for unknown Throwable (vendor bugs, runtime errors, etc.)
+        return new ErrorEnvelope(
+            code: $this->internalErrorCode,
+            message: $this->translator->translate($this->internalErrorCode->translationKey()),
+            logLevel: LogLevel::ERROR,
+            meta: [],
+            logContext: ['exception_class' => get_class($e)],
+        );
+    }
+}
+```
+
+### Translation resolver (framework-agnostic)
+
+```php
+<?php
+
+declare(strict_types=1);
+
+interface TranslationResolverInterface
+{
+    public function translate(string $key, array $params = []): string;
+}
+```
+
+In Laravel you can implement it using `__()`; in Symfony using the Translator component.
+
+---
+
+## 12. Presenters
+
+Presenters adapt an `ErrorEnvelope` to a specific transport.
+
+They:
+
+* format output (JSON, console text, gRPC error)
+* apply transport mappings (HTTP status, exit code, gRPC status)
+
+They never:
+
+* decide error meaning
+* create response codes
+* contain business logic
+
+### 12.1 HTTP presenter
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Symfony\Component\HttpFoundation\JsonResponse;
+
+final class HttpErrorPresenter
+{
+    public function present(ErrorEnvelope $env): JsonResponse
+    {
+        return new JsonResponse([
+            'success' => false,
+            'error' => [
+                'response_code' => $env->responseCode(),
+                'log_level' => $env->logLevel,
+                'message' => $env->message,
+                'meta' => (object) $env->meta,
+            ],
+        ], $env->code->httpStatus());
+    }
+}
+```
+
+### 12.2 CLI presenter
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class CliErrorPresenter
+{
+    /**
+     * @return int Exit code
+     */
+    public function present(ErrorEnvelope $env): int
+    {
+        fwrite(STDERR, sprintf(
+            "%s: %s
+",
+            $env->responseCode(),
+            $env->message
+        ));
+
+        if (!empty($env->meta)) {
+            fwrite(STDERR, json_encode(['meta' => $env->meta], JSON_UNESCAPED_SLASHES) . "
+");
+        }
+
+        return $env->code->cliExitCode();
+    }
+}
+```
+
+### 12.3 gRPC presenter (conceptual)
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class GrpcErrorPresenter
+{
+    /**
+     * Example return type: an array describing gRPC status + metadata.
+     * A real implementation would return/throw the library-specific status object.
+     *
+     * @return array{status:int,message:string,metadata:array<string,string>}
+     */
+    public function present(ErrorEnvelope $env): array
+    {
+        return [
+            'status' => $env->code->grpcStatus(),
+            'message' => $env->message,
+            'metadata' => [
+                'response_code' => $env->responseCode(),
+                'log_level' => $env->logLevel,
+            ],
+        ];
+    }
+}
+```
+
+---
+
+## 13. Laravel Implementation (Reference)
+
+Laravel integrates this architecture through the global exception handler.
+
+The handler:
+
+* delegates normalization to the ErrorAdapter
+* delegates logging to LoggerStrategy
+* delegates serialization to the HTTP presenter
+
+Controllers and services never handle errors explicitly unless performing recovery.
+
+### 13.1 Wiring (service container)
+
+```php
+<?php
+
+use Illuminate\Support\ServiceProvider;
+
+final class ErrorHandlingServiceProvider extends ServiceProvider
+{
+    public function register(): void
+    {
+        $this->app->singleton(TranslationResolverInterface::class, function () {
+            return new class implements TranslationResolverInterface {
+                public function translate(string $key, array $params = []): string
+                {
+                    return __($key, $params);
+                }
+            };
+        });
+
+        // Provide a domain-owned INTERNAL_ERROR code (example)
+        $this->app->singleton('internal_error_code', function () {
+            return SystemErrorCode::INTERNAL_ERROR;
+        });
+
+        $this->app->singleton(ErrorAdapterInterface::class, function ($app) {
+            return new DefaultErrorAdapter(
+                translator: $app->make(TranslationResolverInterface::class),
+                internalErrorCode: $app->make('internal_error_code'),
+            );
+        });
+
+        $this->app->singleton(HttpErrorPresenter::class);
+        $this->app->singleton(LoggerStrategy::class);
+    }
+}
+```
+
+### 13.2 Laravel Handler
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Exceptions;
+
+use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Throwable;
+
+final class Handler extends ExceptionHandler
+{
+    public function __construct(
+        private readonly ErrorAdapterInterface $adapter,
+        private readonly HttpErrorPresenter $presenter,
+        private readonly LoggerStrategy $loggerStrategy,
+    ) {
+        parent::__construct(app());
+    }
+
+    public function render($request, Throwable $e): JsonResponse
+    {
+        $env = $this->adapter->toEnvelope($e);
+
+        $this->loggerStrategy->log(
+            level: $env->logLevel,
+            message: $e->getMessage(),
+            context: $env->logContext,
+            e: $e,
+        );
+
+        return $this->presenter->present($env);
+    }
+}
+```
+
+### 13.3 Example controller usage
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\JsonResponse;
+
+final class VideoController
+{
+    public function uploadThumbnail(Request $request): JsonResponse
+    {
+        $width = (int) $request->input('width');
+        $height = (int) $request->input('height');
+
+        VideoAssertions::thumbnailIsLargeEnough($width, $height);
+
+        return response()->json(['success' => true]);
+    }
+}
+```
+
+---
+
+## 14. Symfony Implementation (Reference)
+
+Symfony integrates via:
+
+* kernel exception listeners for HTTP
+* console exception handlers for CLI
+
+Both reuse the same ErrorAdapter and presenters, ensuring consistent behavior across entry points.
+
+### 14.1 HTTP: Kernel exception subscriber
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpKernel\Event\ExceptionEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+
+final class ApiExceptionSubscriber implements EventSubscriberInterface
+{
+    public function __construct(
+        private readonly ErrorAdapterInterface $adapter,
+        private readonly HttpErrorPresenter $presenter,
+        private readonly LoggerStrategy $loggerStrategy,
+    ) {}
+
+    public static function getSubscribedEvents(): array
+    {
+        return [KernelEvents::EXCEPTION => 'onKernelException'];
+    }
+
+    public function onKernelException(ExceptionEvent $event): void
+    {
+        $e = $event->getThrowable();
+        $env = $this->adapter->toEnvelope($e);
+
+        $this->loggerStrategy->log(
+            level: $env->logLevel,
+            message: $e->getMessage(),
+            context: $env->logContext,
+            e: $e,
+        );
+
+        $event->setResponse($this->presenter->present($env));
+    }
+}
+```
+
+### 14.2 CLI: Console base command (recovery boundary)
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Throwable;
+
+abstract class SafeCommand extends Command
+{
+    public function __construct(
+        private readonly ErrorAdapterInterface $adapter,
+        private readonly CliErrorPresenter $presenter,
+        private readonly LoggerStrategy $loggerStrategy,
+        ?string $name = null
+    ) {
+        parent::__construct($name);
+    }
+
+    final protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        try {
+            return $this->executeSafe($input, $output);
+        } catch (Throwable $e) {
+            $env = $this->adapter->toEnvelope($e);
+
+            $this->loggerStrategy->log(
+                level: $env->logLevel,
+                message: $e->getMessage(),
+                context: $env->logContext,
+                e: $e,
+            );
+
+            return $this->presenter->present($env);
+        }
+    }
+
+    abstract protected function executeSafe(InputInterface $input, OutputInterface $output): int;
+}
+```
+
+---
+
+## 15. Logging Strategy
+
+Logging is severity-driven and centralized.
+
+Rules:
+
+* stacktrace only for `error`, `critical`, `alert`, `emergency`, `debug`
+* informational errors do not include stacktraces
+* logging context is always structured
+
+This prevents noisy logs while preserving debuggability.
+
+### LoggerStrategy (reference implementation)
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Psr\Log\LogLevel;
+use Throwable;
+
+final class LoggerStrategy
+{
+    private const TRACE_LEVELS = [
+        LogLevel::ERROR,
+        LogLevel::CRITICAL,
+        LogLevel::ALERT,
+        LogLevel::EMERGENCY,
+        LogLevel::DEBUG,
+    ];
+
+    /**
+     * @param array<string,mixed> $context
+     */
+    public function log(string $level, string $message, array $context, Throwable $e): void
+    {
+        // Passing 'exception' => $e typically triggers stacktrace rendering (Monolog/Laravel)
+        if (in_array($level, self::TRACE_LEVELS, true)) {
+            logger()->log($level, $message, $context + ['exception' => $e]);
+            return;
+        }
+
+        // No stacktrace: do not pass the Throwable.
+        logger()->log($level, $message, $context + ['exception_class' => get_class($e)]);
+    }
+}
+```
+
+---
+
+## 16. Performance: Cost of Exceptions in PHP
+
+Exceptions in PHP are expensive operations.
+
+Cost factors:
+
+* object allocation
+* stacktrace generation
+* stack unwinding
+* logging I/O
+
+Consequences:
+
+* exceptions must represent rare, abnormal states
+* they must never be used in loops or normal flow
+* this architecture assumes low exception frequency
+
+---
+
+## 17. try/catch Usage Rule
+
+try/catch blocks are allowed only for explicit recovery or fallback.
+
+```php
+try {
+    $service->execute();
+} catch (ThumbnailInvalidDimensionsException $e) {
+    $this->useDefaultThumbnail();
+}
+```
+
+Catching without recovery is forbidden.
+
+---
+
+## 18. Testing Strategy
+
+Tests are split by responsibility.
+
+### 18.1 Domain tests
+
+Domain tests assert which exception is thrown and its semantics, without involving HTTP serialization.
+
+```php
+public function test_thumbnail_too_small_throws_exception(): void
+{
+    $this->expectException(ThumbnailInvalidDimensionsException::class);
+
+    VideoAssertions::thumbnailIsLargeEnough(320, 240);
+}
+```
+
+### 18.2 Boundary tests (HTTP)
+
+Boundary tests assert the public contract: stable `response_code`, status, and structured payload.
+
+```php
+public function test_http_payload_contains_response_code(): void
+{
+    $response = $this->postJson('/api/video/thumbnail', [
+        'width' => 320,
+        'height' => 240,
+    ]);
+
+    $response
+        ->assertStatus(422)
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('error.response_code', 'VIDEO_THUMBNAIL_INVALID_DIMENSIONS');
+}
+```
+
+Rule: tests must never assert translated messages (they change).
+
+---
+
+## 19. Conceptual Workflow Diagram
+
+```mermaid
+flowchart TD
+  A[Intent] --> B[Domain Logic]
+  B -->|Valid| C[Continue]
+  B -->|Invalid| D[Semantic Failure]
+  D --> E[Normalize Meaning]
+  E --> F[Apply Policy]
+  F --> G[Log]
+  F --> H[Present]
+```
+
+The workflow separates meaning, policy, and transport.
+
+---
+
+## 20. Anti-Patterns
+
+* using exceptions for normal flow
+* catching and swallowing errors
+* leaking stacktraces to clients
+* unstable or reused response codes
+* global error enums
+
+---
+
+## 21. Migration Strategy
+
+1. Freeze error response schema
+2. Introduce ErrorCodeInterface and ApiException
+3. Add adapters and presenters
+4. Migrate critical paths first
+5. Enforce rules via code review
+
+---
+
+## 22. ADR (Architecture Decision Record)
+
+**ADR-004 – Exception-Driven Application Flow**
+
+Context: error handling is inconsistent and scattered.
+
+Decision: model abnormal states as semantic exceptions and translate them at the boundary.
+
+Consequences:
+
+* consistent APIs
+* cleaner domain code
+* stricter discipline required
+
+---
+
+## 23. Conclusion
+
+This architecture is not about throwing exceptions everywhere. It is about making abnormal states explicit, centralizing error policy, and protecting business logic from transport concerns.
+
+Used with discipline, it scales across HTTP, CLI, gRPC, and asynchronous systems.
