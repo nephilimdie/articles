@@ -1,5 +1,16 @@
 # Exception-Driven Application Flow in Laravel
 
+```mermaid
+flowchart TD
+  A["Intent"] --> B["Domain Logic"]
+  B -->|Valid| C["Continue"]
+  B -->|Invalid| D["Semantic Failure"]
+  D --> E["Normalize Meaning"]
+  E --> F["Apply Policy"]
+  F --> G["Log"]
+  F --> H["Present"]
+```
+
 This document is intended for senior backend developers, tech leads, and software architects working with medium-to-large Laravel codebases. It assumes familiarity with modern PHP (>=8.1), OOP, SOLID principles, and layered application architectures.
 
 This document defines:
@@ -97,7 +108,7 @@ An implementation conforming to this document:
 * MUST model abnormal states as **semantic exceptions** (not boolean returns or ad-hoc arrays)
 * MUST expose a stable, machine-readable **response_code** as the primary client contract
 * MUST keep transport policy (HTTP status codes, exit codes, gRPC status, messages, logging strategy) **out of domain code**
-* MUST normalize any `Throwable` into a canonical **Error DTO** via an ErrorAdapter
+* MUST normalize any `Throwable` into a canonical **Boundary Error DTO** via an ErrorAdapter
 * MUST present errors through a consistent transport payload/schema (HTTP/CLI/gRPC)
 * SHOULD translate human-facing messages only at the boundary (i18n), never in domain logic
 * MUST test contracts by asserting `response_code` and status, not translated messages
@@ -441,30 +452,6 @@ abstract class ApiException extends Exception implements ApiExceptionInterface
 
 Domain exceptions represent specific, semantic failure cases. Each exception class must be precise, explicit, and owned by the domain that defines the rule.
 
-### Authorization example
-
-```php
-<?php
-declare(strict_types=1);
-
-namespace ExceptionDriven\Domain\User\Exceptions;
-
-use ExceptionDriven\Exceptions\ApiException;
-use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
-use ExceptionDriven\Domain\User\UserErrorCode;
-use Psr\Log\LogLevel;
-
-final class UserNotAuthorizedException extends ApiException
-{
-    public const LOG_LEVEL = LogLevel::NOTICE;
-
-    public static function code(): ErrorCodeInterface
-    {
-        return UserErrorCode::NOT_AUTHORIZED;
-    }
-}
-```
-
 ### Validation-like example
 
 ```php
@@ -534,9 +521,9 @@ Assertions make invariants explicit, self-documenting, and trivially testable.
 
 ---
 
-## Error DTO
+## Boundary Error DTO
 
-The Error DTO is the internal, canonical representation of an error. All transports operate from this model.
+The Boundary Error DTO is the internal, canonical representation of an error. All transports operate from this model.
 
 It contains:
 
@@ -546,7 +533,7 @@ It contains:
 * the severity level (PSR-3)
 * public metadata (safe for clients)
 * structured logging context (internal-only)
-* an `error_id` (ULID/UUID) chosen from `X-Request-ID`/`X-Correlation-ID`/`traceparent` if present, otherwise generated at the boundary
+* a `correlation_id` (ULID/UUID) chosen from `X-Request-ID`/`X-Correlation-ID`/`traceparent` if present, otherwise generated at the boundary
 
 This guarantees a single source of truth for error handling.
 
@@ -558,7 +545,7 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\ErrorHandling;
 
-final class ErrorDto
+final class BoundaryErrorDto
 {
     /**
      * @param array<string,mixed> $messageParams
@@ -572,12 +559,32 @@ final class ErrorDto
         public readonly string $logLevel,
         public readonly array $meta = [],
         public readonly array $logContext = [],
-        public readonly string $errorId = '',
+        public readonly string $correlationId = '',
     ) {}
 
     public function responseCode(): string
     {
         return $this->code->responseCode();
+    }
+
+    /**
+     * Prepare structured context for logging.
+     * Tip: adapt this structure to your observability stack (PSR-3 context, OTEL attributes, etc.).
+     * Keep it stable and machine-readable; avoid PII.
+     *
+     * @return array<string,mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'response_code' => $this->responseCode(),
+            'log_level' => $this->logLevel,
+            'message_key' => $this->messageKey,
+            'message_params' => $this->messageParams,
+            'meta' => $this->meta,
+            'correlation_id' => $this->correlationId,
+            'context' => $this->logContext,
+        ];
     }
 }
 ```
@@ -593,7 +600,7 @@ final class ErrorDto
 
 ## ErrorAdapter
 
-The ErrorAdapter converts any `Throwable` into an `ErrorDto`.
+The ErrorAdapter converts any `Throwable` into a `BoundaryErrorDto`.
 
 Responsibilities:
 
@@ -615,7 +622,7 @@ use Throwable;
 
 interface ErrorAdapterInterface
 {
-    public function toDto(Throwable $e, string $errorId): ErrorDto;
+    public function toDto(Throwable $e, string $correlationId): BoundaryErrorDto;
 }
 ```
 
@@ -642,28 +649,29 @@ namespace ExceptionDriven\ErrorHandling;
 
 use ExceptionDriven\Exceptions\ApiExceptionInterface;
 use Psr\Log\LogLevel;
+use Throwable;
 
 final class DefaultErrorAdapter implements ErrorAdapterInterface
 {
-    public function toDto(Throwable $e, string $errorId): ErrorDto
+    public function toDto(Throwable $e, string $correlationId): BoundaryErrorDto
     {
         if ($e instanceof ApiExceptionInterface) {
             $code = $e->codeEnum();
 
-            return new ErrorDto(
+            return new BoundaryErrorDto(
                 code: $code,
                 messageKey: $code->translationKey(),
                 messageParams: $e->messageParams(),
                 logLevel: $e->logLevel(),
                 meta: $e->publicMeta(),
                 logContext: $e->context(),
-                errorId: $errorId,
+                correlationId: $correlationId,
             );
         }
 
         $code = PlatformErrorCode::INTERNAL_SERVER_ERROR;
 
-        return new ErrorDto(
+        return new BoundaryErrorDto(
             code: $code,
             messageKey: $code->translationKey(),
             messageParams: [],
@@ -677,7 +685,7 @@ final class DefaultErrorAdapter implements ErrorAdapterInterface
                 'exception_line' => $e->getLine(),
                 'exception_fingerprint' => sprintf('%s@%s:%d', get_class($e), $e->getFile(), $e->getLine()),
             ],
-            errorId: $errorId,
+            correlationId: $correlationId,
         );
     }
 }
@@ -747,7 +755,7 @@ interface TransportPolicyInterface
 
 ## Presenters
 
-Presenters adapt an `ErrorDto` to a specific transport and format. They use an application-level Transport Policy Map to resolve transport-specific details (HTTP status, CLI exit code, gRPC status).
+Presenters adapt a `BoundaryErrorDto` to a specific transport and format. They use an application-level Transport Policy Map to resolve transport-specific details (HTTP status, CLI exit code, gRPC status).
 
 They:
 
@@ -759,6 +767,29 @@ They never:
 * decide error meaning
 * create response codes
 * contain business logic
+
+### Presenter interface
+
+Define a common interface implemented by all presenters. Implementations may return different types (HTTP Response, CLI exit code, gRPC metadata), so the method is polymorphic.
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace ExceptionDriven\Presentation;
+
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
+
+interface ErrorPresenterInterface
+{
+    /**
+     * Present the error to the current transport.
+     *
+     * @return mixed Response|int|array depending on transport
+     */
+    public function present(ErrorDto $dto): mixed;
+}
+```
 
 ### Presenter registry (by transport)
 
@@ -783,8 +814,7 @@ enum Transport: string
 interface ErrorPresenterRegistryInterface
 {
     public function resolveForHttp(Request $request): ErrorPresenterInterface;
-    /** @return object One of: HttpErrorPresenter|HtmlErrorPresenter|CliErrorPresenter|GrpcErrorPresenter */
-    public function get(Transport $transport): object;
+    public function get(Transport $transport): ErrorPresenterInterface;
 }
 
 final class DefaultErrorPresenterRegistry implements ErrorPresenterRegistryInterface
@@ -804,7 +834,7 @@ final class DefaultErrorPresenterRegistry implements ErrorPresenterRegistryInter
         return $request->expectsJson() ? $this->http : $this->html;
     }
 
-    public function get(Transport $transport): object
+    public function get(Transport $transport): ErrorPresenterInterface
     {
         return match ($transport) {
             Transport::HTTP_JSON => $this->http,
@@ -826,13 +856,14 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 use Illuminate\Http\JsonResponse;
+use Symfony\Component\HttpFoundation\Response;
 
-final class HttpErrorPresenter
+final class HttpErrorPresenter implements ErrorPresenterInterface
 {
-    public function present(ErrorDto $dto): JsonResponse
+    public function present(ErrorDto $dto): Response
     {
         // Translation is a boundary service (framework i18n), not domain logic.
         $message = __($dto->messageKey, $dto->messageParams);
@@ -842,7 +873,7 @@ final class HttpErrorPresenter
             'log_level' => $dto->logLevel,
             'message' => $message,
             'meta' => (object) $dto->meta,
-            'error_id' => $dto->errorId,
+            'correlation_id' => $dto->correlationId,
         ];
 
         return new JsonResponse([
@@ -855,7 +886,7 @@ final class HttpErrorPresenter
 
 ### HTML/Blade presenter
 
-If your route renders HTML with Blade instead of JSON, add a dedicated presenter that transforms the Error DTO into a view response. Use a presenter selection strategy to choose the presenter for the request.
+If your route renders HTML with Blade instead of JSON, add a dedicated presenter that transforms the Boundary Error DTO into a view response. Use a presenter selection strategy to choose the presenter for the request.
 
 ```php
 <?php
@@ -863,11 +894,11 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 use Illuminate\Http\Response;
 
-final class HtmlErrorPresenter
+final class HtmlErrorPresenter implements ErrorPresenterInterface
 {
     public function present(ErrorDto $dto): Response
     {
@@ -878,13 +909,13 @@ final class HtmlErrorPresenter
             'response_code' => $dto->responseCode(),
             'message' => $message,
             'meta' => $dto->meta,
-            'error_id' => $dto->errorId,
+            'correlation_id' => $dto->correlationId,
         ], app(TransportPolicyInterface::class)->httpStatus($dto->code));
     }
 }
 ```
 ### Security note (meta in HTML)
-meta is client-safe by definition, but it is not automatically user-displayable. In HTML/Blade responses you SHOULD avoid rendering meta entirely (prefer showing only error_id + a generic message).
+meta is client-safe by definition, but it is not automatically user-displayable. In HTML/Blade responses you SHOULD avoid rendering meta entirely (prefer showing only correlation_id + a generic message).
 If you decide to show any meta fields, you MUST escape output (never render raw/unescaped values) and you SHOULD restrict to an explicit allowlist of fields intended for end-users. Never include stack traces, SQL, internal identifiers, or free-form strings that may contain user-controlled content.
 
 In the Laravel handler:
@@ -901,17 +932,15 @@ use Illuminate\Support\Str;
 use Throwable;
 
 $this->renderable(function (Throwable $e, $request) {
-    $errorId =
+    $correlationId =
         $request?->headers->get('X-Request-ID')
         ?? $request?->headers->get('X-Correlation-ID')
         ?? $request?->headers->get('traceparent')
         ?? (string) Str::ulid();
 
-    $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $errorId);
+    $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $correlationId);
 
-    $context = $dto->logContext;
-    $context['exception'] = $e; // PSR-3 convention
-    logger()->log($dto->logLevel, $e->getMessage(), $context);
+    logger()->log($dto->logLevel, $e->getMessage(), $dto->toArray());
 
     $presenter = app(ErrorPresenterRegistryInterface::class)->resolveForHttp($request);
     return $presenter->present($dto);
@@ -935,10 +964,10 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class CliErrorPresenter
+final class CliErrorPresenter implements ErrorPresenterInterface
 {
     /**
      * @return int Exit code
@@ -949,7 +978,7 @@ final class CliErrorPresenter
         $message = __($dto->messageKey, $dto->messageParams);
 
         fwrite(STDERR, sprintf("%s: %s\n", $dto->responseCode(), $message));
-        fwrite(STDERR, sprintf("error_id: %s\n", $dto->errorId));
+        fwrite(STDERR, sprintf("correlation_id: %s\n", $dto->correlationId));
 
         if (!empty($dto->meta)) {
             fwrite(STDERR, json_encode(['meta' => $dto->meta], JSON_UNESCAPED_SLASHES) . "\n");
@@ -971,10 +1000,10 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class GrpcErrorPresenter
+final class GrpcErrorPresenter implements ErrorPresenterInterface
 {
     /**
      * Example return type: an array describing gRPC status + metadata.
@@ -991,7 +1020,7 @@ final class GrpcErrorPresenter
             'metadata' => [
                 'response_code' => $dto->responseCode(),
                 'log_level' => $dto->logLevel,
-                'error_id' => $dto->errorId,
+                'correlation_id' => $dto->correlationId,
             ],
         ];
     }
@@ -1001,7 +1030,7 @@ final class GrpcErrorPresenter
 
 ## Laravel Implementation (Reference)
 
-Laravel integrates this architecture through the default exception handler (`App\\Exceptions\\Handler`) plus container wiring via a Service Provider.
+Laravel integrates this architecture through the exception handler (`ExceptionDriven\\Exceptions\\Handler`) plus container wiring via a Service Provider.
 
 ### Wiring (service container)
 
@@ -1011,52 +1040,61 @@ Register the core components in a dedicated Service Provider.
 <?php
 declare(strict_types=1);
 
-namespace App\\Providers;
+namespace ExceptionDriven\\Providers;
 
+use ExceptionDriven\\ErrorHandling\\DefaultErrorAdapter;
+use ExceptionDriven\\ErrorHandling\\ErrorAdapterInterface;
+use ExceptionDriven\\Policy\\DefaultTransportPolicy;
+use ExceptionDriven\\Policy\\TransportPolicyInterface;
+use ExceptionDriven\\Presentation\\CliErrorPresenter;
+use ExceptionDriven\\Presentation\\DefaultErrorPresenterRegistry;
+use ExceptionDriven\\Presentation\\ErrorPresenterRegistryInterface;
+use ExceptionDriven\\Presentation\\GrpcErrorPresenter;
+use ExceptionDriven\\Presentation\\HtmlErrorPresenter;
+use ExceptionDriven\\Presentation\\HttpErrorPresenter;
 use Illuminate\\Support\\ServiceProvider;
 
 final class ErrorHandlingServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->app->singleton(\\ErrorAdapterInterface::class, \\DefaultErrorAdapter::class);
-        $this->app->singleton(\\TransportPolicyInterface::class, \\DefaultTransportPolicy::class);
+        $this->app->singleton(ErrorAdapterInterface::class, DefaultErrorAdapter::class);
+        $this->app->singleton(TransportPolicyInterface::class, DefaultTransportPolicy::class);
 
-        $this->app->singleton(\\HttpErrorPresenter::class);
-        $this->app->singleton(\\HtmlErrorPresenter::class);
-        $this->app->singleton(\\CliErrorPresenter::class);
-        $this->app->singleton(\\GrpcErrorPresenter::class);
-        $this->app->singleton(\\ErrorPresenterRegistryInterface::class, \\DefaultErrorPresenterRegistry::class);
-
-        // Optional transports
-        // $this->app->singleton(\\CliErrorPresenter::class);
-        // $this->app->singleton(\\GrpcErrorPresenter::class);
+        $this->app->singleton(HttpErrorPresenter::class);
+        $this->app->singleton(HtmlErrorPresenter::class);
+        $this->app->singleton(CliErrorPresenter::class);
+        $this->app->singleton(GrpcErrorPresenter::class);
+        $this->app->singleton(ErrorPresenterRegistryInterface::class, DefaultErrorPresenterRegistry::class);
     }
 }
 ```
 
-Note: choose your namespaces (e.g. `App\\ErrorHandling\\...`). The example uses short names for readability.
+Note: examples use the real namespaces from this repo (`ExceptionDriven\\...`).
 
 ### Using Laravel’s default Handler
 
 Keep the framework handler and register both the HTTP renderable and the console renderer. The handler is the boundary that:
 
 - normalizes any `Throwable` via the ErrorAdapter
-- computes an `error_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates one and passes it into the adapter
+- computes an `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates one and passes it into the adapter
 - logs using Laravel’s logger
 - for HTTP: selects the correct presenter via a strategy (resolver)
 - for CLI: uses the CLI presenter in `renderForConsole`
+
+Console exception rendering hooks differ between Laravel versions. The intent remains: compute correlation_id, normalize via adapter, log, then delegate to the CLI presenter.
 
 ```php
 <?php
 declare(strict_types=1);
 
-namespace App\\Exceptions;
+namespace ExceptionDriven\\Exceptions;
 
+use ExceptionDriven\\ErrorHandling\\ErrorAdapterInterface;
+use ExceptionDriven\\Presentation\\ErrorPresenterRegistryInterface;
+use ExceptionDriven\\Presentation\\Transport;
 use Illuminate\\Foundation\\Exceptions\\Handler as ExceptionHandler;
 use Illuminate\\Support\\Str;
-use ExceptionDriven\\Presentation\\ErrorPresenterRegistryInterface;
-use ExceptionDriven\\Presentation\\CliErrorPresenter;
 use Throwable;
 
 final class Handler extends ExceptionHandler
@@ -1064,44 +1102,38 @@ final class Handler extends ExceptionHandler
     public function register(): void
     {
         $this->renderable(function (Throwable $e, $request) {
-            $errorId =
+            $correlationId =
                 $request?->headers->get('X-Request-ID')
                 ?? $request?->headers->get('X-Correlation-ID')
                 ?? $request?->headers->get('traceparent')
                 ?? (string) Str::ulid();
 
-            $dto = app(\\ErrorAdapterInterface::class)->toDto($e, (string) $errorId);
+            $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $correlationId);
 
-            $context = $dto->logContext;
-            $context['exception'] = $e; // PSR-3 convention
             logger()->log(
                 $dto->logLevel,
                 $e->getMessage(),
-                $context
+                $dto->toArray()
             );
 
-            $presenter = app(\\ErrorPresenterRegistryInterface::class)->resolveForHttp($request);
+            $presenter = app(ErrorPresenterRegistryInterface::class)->resolveForHttp($request);
             return $presenter->present($dto);
         });
     }
 
     public function renderForConsole($output, Throwable $e): void
     {
-        $errorId = getenv('X_REQUEST_ID')
+        $correlationId = getenv('X_REQUEST_ID')
             ?: getenv('X_CORRELATION_ID')
             ?: getenv('TRACEPARENT')
             ?: (string) Str::ulid();
 
-        $dto = app(\\ErrorAdapterInterface::class)->toDto($e, (string) $errorId);
+        $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $correlationId);
 
-        $context = $dto->logContext;
-        $context['exception'] = $e; // PSR-3 convention
-        logger()->log($dto->logLevel, $e->getMessage(), $context);
+        logger()->log($dto->logLevel, $e->getMessage(), $dto->toArray());
 
         // CLI rendering; exit code is returned if you want to use it.
-        /** @var \\ExceptionDriven\\Presentation\\CliErrorPresenter $cli */
-        $cli = app(\\ErrorPresenterRegistryInterface::class)->get(Transport::CLI);
-        $cli->present($dto);
+        app(ErrorPresenterRegistryInterface::class)->get(Transport::CLI)->present($dto);
     }
 }
 ```
@@ -1117,14 +1149,14 @@ Minimum expectations:
 * never leak stack traces to clients
 * keep log context structured and stable
 * when enriching context, prefer `array_merge($base, $extra)` to the `+` array operator
-* include `error_id` in every error log entry
+* include `correlation_id` in every error log entry
 
-### Operability: error_id
+### Operability: correlation_id
 
 To make incidents diagnosable in minutes instead of hours:
 
-- Pick `error_id` from `X-Request-ID`/`X-Correlation-ID`/`traceparent` if present; otherwise generate a ULID/UUID at the boundary for every error.
-- Log the `error_id` and return it to clients (JSON/HTML/CLI/gRPC) so support can correlate reports with logs.
+- Pick `correlation_id` from `X-Request-ID`/`X-Correlation-ID`/`traceparent` if present; otherwise generate a ULID/UUID at the boundary for every error.
+- Log the `correlation_id` and return it to clients (JSON/HTML/CLI/gRPC) so support can correlate reports with logs.
 
 ---
 
@@ -1166,7 +1198,7 @@ Catching without recovery is forbidden.
 
 ## Testing Strategy
 
-Tests are split by layer and responsibility. Do not assert translated messages; assert contracts: `response_code`, transport status/exit/grpc, `log_level`, and `error_id`.
+Tests are split by layer and responsibility. Do not assert translated messages; assert contracts: `response_code`, transport status/exit/grpc, `log_level`, and `correlation_id`.
 
 ### Domain tests
 
@@ -1194,13 +1226,13 @@ public function test_thumbnail_exception_exposes_video_error_code(): void
 
 ### Adapter tests
 
-- Given an `ApiExceptionInterface`, `DefaultErrorAdapter::toDto()` preserves `code`, `messageKey`, `messageParams`, `logLevel`, `meta`, `context` and uses the provided `error_id`.
-- Given an unknown `Throwable`, maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` and uses the provided `error_id` (the adapter does not generate IDs).
+- Given an `ApiExceptionInterface`, `DefaultErrorAdapter::toDto()` preserves `code`, `messageKey`, `messageParams`, `logLevel`, `meta`, `context` and uses the provided `correlation_id`.
+- Given an unknown `Throwable`, maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` and uses the provided `correlation_id` (the adapter does not generate IDs).
 
 ### Handler boundary tests
 
-- The Handler derives `error_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates a ULID/UUID.
-- The DTO remains immutable and contains the `error_id`; `logContext` includes `error_id`.
+- The Handler derives `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates a ULID/UUID.
+- The DTO remains immutable and contains the `correlation_id`; `logContext` includes `correlation_id`.
 
 ### Transport Policy Map tests
 
@@ -1229,20 +1261,20 @@ public function test_policy_fallback_for_unmapped_code(): void
 
 HTTP presenter:
 - Uses policy map for status.
-- Payload contains `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.error_id`.
+- Payload contains `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.correlation_id`.
 - Must not leak stack traces; must not depend on translated messages in tests.
 
 CLI presenter:
-- Exit code from policy; prints `response_code`, `error_id`.
+- Exit code from policy; prints `response_code`, `correlation_id`.
 
 gRPC presenter (if applicable):
-- Status from policy; metadata contains `response_code`, `log_level`, `error_id`.
+- Status from policy; metadata contains `response_code`, `log_level`, `correlation_id`.
 
 ### HTTP boundary (integration)
 
 - Trigger a controller/action that throws a semantic exception; assert:
   - HTTP status matches policy for that `response_code`.
-  - Payload contains `response_code`, `log_level`, `error_id` (non-empty).
+  - Payload contains `response_code`, `log_level`, `correlation_id` (non-empty).
   - Do not assert translated messages.
 
 ### Fallback behavior
@@ -1250,7 +1282,7 @@ gRPC presenter (if applicable):
 - Force an unknown `Throwable` (e.g., throw \RuntimeException) and assert:
   - Adapter maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` (check `response_code`).
   - Policy applies default mapping (HTTP 500; CLI 1; gRPC 13).
-  - `error_id` is taken from headers if present or generated.
+  - `correlation_id` is taken from headers if present or generated.
 
 ---
 
@@ -1259,7 +1291,6 @@ gRPC presenter (if applicable):
 ```text
 exception-driven-laravel/
   src/
-    
     Domain/
       Video/
         VideoGuards.php
@@ -1270,7 +1301,7 @@ exception-driven-laravel/
       DefaultErrorAdapter.php
       ErrorAdapterInterface.php
       ErrorCodeInterface.php
-      ErrorDto.php
+      BoundaryErrorDto.php
       PlatformErrorCode.php
     Exceptions/
       ApiException.php
@@ -1295,22 +1326,6 @@ exception-driven-laravel/
 ```
 
 
-## Conceptual Workflow Diagram
-
-```mermaid
-flowchart TD
-  A["Intent"] --> B["Domain Logic"]
-  B -->|Valid| C["Continue"]
-  B -->|Invalid| D["Semantic Failure"]
-  D --> E["Normalize Meaning"]
-  E --> F["Apply Policy"]
-  F --> G["Log"]
-  F --> H["Present"]
-```
-
-The workflow separates meaning, policy, and transport.
-
----
 
 ## Anti-Patterns
 

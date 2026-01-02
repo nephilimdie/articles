@@ -2,8 +2,6 @@
 declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
-
-use ExceptionDriven\ErrorHandling\ErrorDto;
 use Illuminate\Http\Request;
 
 /**
@@ -21,6 +19,5 @@ interface ErrorPresenterRegistryInterface
      *
      * @return object One of: HttpErrorPresenter|HtmlErrorPresenter|CliErrorPresenter|GrpcErrorPresenter
      */
-    public function get(Transport $transport): object;
+    public function get(Transport $transport): ErrorPresenterInterface;
 }
-

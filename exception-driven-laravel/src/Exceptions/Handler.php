@@ -10,24 +10,21 @@ use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
-use ExceptionDriven\Presentation\CliErrorPresenter;
 
 final class Handler extends ExceptionHandler
 {
     public function register(): void
     {
         $this->renderable(function (Throwable $e, $request): Response {
-            $errorId =
+            $correlationId =
                 $request->headers->get('X-Request-ID')
                 ?? $request->headers->get('X-Correlation-ID')
                 ?? $request->headers->get('traceparent')
                 ?? (string) Str::ulid();
 
-            $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $errorId);
+            $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $correlationId);
 
-            $context = $dto->logContext;
-            $context['exception'] = $e;
-            logger()->log($dto->logLevel, $e->getMessage(), $context);
+            logger()->log($dto->logLevel, $e->getMessage(), $dto->toArray());
 
             $presenter = app(ErrorPresenterRegistryInterface::class)->resolveForHttp($request);
             return $presenter->present($dto);
@@ -36,20 +33,16 @@ final class Handler extends ExceptionHandler
 
     public function renderForConsole($output, Throwable $e): void
     {
-        $errorId =
+        $correlationId =
             getenv('X_REQUEST_ID')
             ?: getenv('X_CORRELATION_ID')
             ?: getenv('TRACEPARENT')
             ?: (string) Str::ulid();
 
-        $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $errorId);
+        $dto = app(ErrorAdapterInterface::class)->toDto($e, (string) $correlationId);
 
-        $context = $dto->logContext;
-        $context['exception'] = $e;
-        logger()->log($dto->logLevel, $e->getMessage(), $context);
+        logger()->log($dto->logLevel, $e->getMessage(), $dto->toArray());
 
-        /** @var \ExceptionDriven\Presentation\CliErrorPresenter $cli */
-        $cli = app(ErrorPresenterRegistryInterface::class)->get(Transport::CLI);
-        $cli->present($dto);
+        app(ErrorPresenterRegistryInterface::class)->get(Transport::CLI)->present($dto);
     }
 }

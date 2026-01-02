@@ -26,7 +26,7 @@ final class DefaultErrorPresenterRegistry implements ErrorPresenterRegistryInter
         return $request->expectsJson() ? $this->http : $this->html;
     }
 
-    public function get(Transport $transport): object
+    public function get(Transport $transport): ErrorPresenterInterface
     {
         return match ($transport) {
             Transport::HTTP_JSON => $this->http,
@@ -36,4 +36,3 @@ final class DefaultErrorPresenterRegistry implements ErrorPresenterRegistryInter
         };
     }
 }
-

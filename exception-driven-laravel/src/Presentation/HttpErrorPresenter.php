@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use Illuminate\Http\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
 use ExceptionDriven\Policy\TransportPolicyInterface;
@@ -20,10 +20,10 @@ final class HttpErrorPresenter implements ErrorPresenterInterface
             'log_level' => $dto->logLevel,
             'message' => $message,
             'meta' => (object) $dto->meta,
-            'error_id' => $dto->errorId,
+            'correlation_id' => $dto->correlationId,
         ];
 
-        // Only error_id is returned.
+        // Only correlation_id is returned.
 
         return new JsonResponse([
             'success' => false,

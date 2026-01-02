@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 use Illuminate\Http\Response;
 
@@ -18,7 +18,7 @@ final class HtmlErrorPresenter implements ErrorPresenterInterface
             'response_code' => $dto->responseCode(),
             'message' => $message,
             'meta' => $dto->meta,
-            'error_id' => $dto->errorId,
+            'correlation_id' => $dto->correlationId,
         ], app(TransportPolicyInterface::class)->httpStatus($dto->code));
     }
 }

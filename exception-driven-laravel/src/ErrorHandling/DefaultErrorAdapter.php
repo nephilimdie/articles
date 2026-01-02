@@ -9,26 +9,26 @@ use Throwable;
 
 final class DefaultErrorAdapter implements ErrorAdapterInterface
 {
-    public function toDto(Throwable $throwable, string $errorId): ErrorDto
+    public function toDto(Throwable $throwable, string $correlationId): BoundaryErrorDto
     {
         if ($throwable instanceof ApiExceptionInterface) {
             $code = $throwable->codeEnum();
 
-            return new ErrorDto(
+            return new BoundaryErrorDto(
                 code: $code,
                 messageKey: $code->translationKey(),
                 messageParams: $throwable->messageParams(),
                 logLevel: $throwable->logLevel(),
                 meta: $throwable->publicMeta(),
                 logContext: $throwable->context(),
-                errorId: $errorId,
+                correlationId: $correlationId,
             );
         }
 
         // Fallback for any unexpected Throwable
         $code = PlatformErrorCode::INTERNAL_SERVER_ERROR;
 
-        return new ErrorDto(
+        return new BoundaryErrorDto(
             code: $code,
             messageKey: $code->translationKey(),
             messageParams: [],
@@ -42,7 +42,7 @@ final class DefaultErrorAdapter implements ErrorAdapterInterface
                 'exception_line' => $throwable->getLine(),
                 'exception_fingerprint' => sprintf('%s@%s:%d', get_class($throwable), $throwable->getFile(), $throwable->getLine()),
             ],
-            errorId: $errorId,
+            correlationId: $correlationId,
         );
     }
 }

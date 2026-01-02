@@ -6,7 +6,7 @@ namespace ExceptionDriven\ErrorHandling;
 
 use Psr\Log\LogLevel;
 
-final class ErrorDto
+final class BoundaryErrorDto
 {
     /**
      * @param array<string,mixed> $messageParams
@@ -20,7 +20,7 @@ final class ErrorDto
         public readonly string $logLevel = LogLevel::ERROR,
         public readonly array $meta = [],
         public readonly array $logContext = [],
-        public readonly string $errorId = '',
+        public readonly string $correlationId = '',
     ) {}
 
     public function responseCode(): string
@@ -29,4 +29,22 @@ final class ErrorDto
     }
 
     // DTO is immutable; construct it once at the boundary via the adapter.
+
+    /**
+     * Prepare a structured array for logging context.
+     *
+     * @return array<string,mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'response_code' => $this->responseCode(),
+            'log_level' => $this->logLevel,
+            'message_key' => $this->messageKey,
+            'message_params' => $this->messageParams,
+            'meta' => $this->meta,
+            'correlation_id' => $this->correlationId,
+            'context' => $this->logContext,
+        ];
+    }
 }

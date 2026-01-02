@@ -3,10 +3,10 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class GrpcErrorPresenter
+final class GrpcErrorPresenter implements ErrorPresenterInterface
 {
     /**
      * Example return type: an array describing gRPC status + metadata.
@@ -23,7 +23,7 @@ final class GrpcErrorPresenter
             'metadata' => [
                 'response_code' => $dto->responseCode(),
                 'log_level' => $dto->logLevel,
-                'error_id' => $dto->errorId,
+                'correlation_id' => $dto->correlationId,
             ],
         ];
     }

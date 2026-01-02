@@ -7,5 +7,5 @@ use Throwable;
 
 interface ErrorAdapterInterface
 {
-    public function toDto(Throwable $throwable, string $errorId): ErrorDto;
+    public function toDto(Throwable $throwable, string $correlationId): BoundaryErrorDto;
 }

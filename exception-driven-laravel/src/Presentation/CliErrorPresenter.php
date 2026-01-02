@@ -3,10 +3,10 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Presentation;
 
-use ExceptionDriven\ErrorHandling\ErrorDto;
+use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class CliErrorPresenter
+final class CliErrorPresenter implements ErrorPresenterInterface
 {
     /**
      * @return int Exit code
@@ -17,7 +17,7 @@ final class CliErrorPresenter
         $message = __($dto->messageKey, $dto->messageParams);
 
         fwrite(STDERR, sprintf("%s: %s\n", $dto->responseCode(), $message));
-        fwrite(STDERR, sprintf("error_id: %s\n", $dto->errorId));
+        fwrite(STDERR, sprintf("correlation_id: %s\n", $dto->correlationId));
 
         if (!empty($dto->meta)) {
             fwrite(STDERR, json_encode(['meta' => $dto->meta], JSON_UNESCAPED_SLASHES) . "\n");
