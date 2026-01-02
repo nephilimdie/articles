@@ -45,4 +45,6 @@ final class Handler extends ExceptionHandler
 
         app(ErrorPresenterRegistryInterface::class)->get(Transport::CLI)->present($dto);
     }
+
+    
 }

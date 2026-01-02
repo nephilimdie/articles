@@ -8,6 +8,7 @@ use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 use ExceptionDriven\Policy\TransportOutcome;
 use ExceptionDriven\Policy\TransportPolicyProviderInterface;
 use Symfony\Component\HttpFoundation\Response;
+use ExceptionDriven\Policy\GrpcStatus;
 
 final class VideoTransportPolicyProvider implements TransportPolicyProviderInterface
 {
@@ -20,9 +21,8 @@ final class VideoTransportPolicyProvider implements TransportPolicyProviderInter
     {
         /** @var VideoErrorCode $code */
         return match ($code) {
-            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(Response::HTTP_UNPROCESSABLE_ENTITY, 1, 3),
-            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, 5),
+            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(Response::HTTP_UNPROCESSABLE_ENTITY, 1, GrpcStatus::INVALID_ARGUMENT),
+            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, GrpcStatus::NOT_FOUND),
         };
     }
 }
-

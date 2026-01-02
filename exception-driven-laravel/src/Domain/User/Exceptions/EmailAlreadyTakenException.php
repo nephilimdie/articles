@@ -14,7 +14,7 @@ final class EmailAlreadyTakenException extends ApiException
 
     public function __construct(private string $email)
     {
-        parent::__construct('Email already taken');
+        parent::__construct();
     }
 
     public static function code(): ErrorCodeInterface
@@ -26,5 +26,14 @@ final class EmailAlreadyTakenException extends ApiException
     {
         return ['email' => $this->email];
     }
-}
 
+    public function category(): string
+    {
+        return 'conflict';
+    }
+
+    public function isExpected(): bool
+    {
+        return true;
+    }
+}

@@ -8,7 +8,6 @@ final class TransportOutcome
     public function __construct(
         public readonly int $httpStatus,
         public readonly int $cliExitCode,
-        public readonly int $grpcStatus,
+        public readonly GrpcStatus $grpcStatus,
     ) {}
 }
-

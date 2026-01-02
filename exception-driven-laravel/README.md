@@ -41,7 +41,7 @@ flowchart TD
   AD --> DTO["Canonical Error Model (BoundaryErrorDto)"]
 
   DTO --> POL["Resolve Transport Outcome (TransportPolicy: TransportPolicyRegistry)"]
-  DTO --> LOG["Log (logger()->log + structured context)"]
+DTO --> LOG["Log (logger()->log + structured context)"]
 
   POL --> REG["Select Presenter (Registry: DefaultErrorPresenterRegistry)"]
 
@@ -540,6 +540,10 @@ final class BoundaryErrorDto
         public readonly array $meta = [],
         public readonly array $logContext = [],
         public readonly string $correlationId = '',
+        public readonly string $correlationId = '',
+        public readonly string $category = 'internal',
+        public readonly bool $retryable = false,
+        public readonly bool $isExpected = false,
     ) {}
 
     public function responseCode(): string
@@ -563,6 +567,9 @@ final class BoundaryErrorDto
             'message_params' => $this->messageParams,
             'meta' => $this->meta,
             'correlation_id' => $this->correlationId,
+            'category' => $this->category,
+            'retryable' => $this->retryable,
+            'is_expected' => $this->isExpected,
             'context' => $this->logContext,
         ];
     }
@@ -659,7 +666,6 @@ final class DefaultErrorAdapter implements ErrorAdapterInterface
             meta: [],
             logContext: [
                 'exception_class' => get_class($e),
-                'exception_message' => $e->getMessage(), // avoid PII
                 'exception_code' => $e->getCode(),
                 'exception_file' => $e->getFile(),
                 'exception_line' => $e->getLine(),
@@ -701,7 +707,7 @@ final class TransportOutcome
     public function __construct(
         public readonly int $httpStatus,
         public readonly int $cliExitCode,
-        public readonly int $grpcStatus,
+        public readonly GrpcStatus $grpcStatus,
     ) {}
 }
 ```
@@ -778,6 +784,7 @@ use ExceptionDriven\Policy\TransportOutcome;
 use ExceptionDriven\Policy\TransportPolicyProviderInterface;
 
 use Symfony\Component\HttpFoundation\Response;
+use ExceptionDriven\Policy\GrpcStatus;
 
 final class VideoTransportPolicyProvider implements TransportPolicyProviderInterface
 {
@@ -790,8 +797,8 @@ final class VideoTransportPolicyProvider implements TransportPolicyProviderInter
     {
         /** @var VideoErrorCode $code */
         return match ($code) {
-            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(Response::HTTP_UNPROCESSABLE_ENTITY, 1, 3),
-            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, 5),
+            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(Response::HTTP_UNPROCESSABLE_ENTITY, 1, GrpcStatus::INVALID_ARGUMENT),
+            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, GrpcStatus::NOT_FOUND),
         };
     }
 }
@@ -809,6 +816,7 @@ namespace ExceptionDriven\Policy;
 
 use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 use ExceptionDriven\ErrorHandling\PlatformErrorCode;
+use ExceptionDriven\Policy\GrpcStatus;
 
 use Symfony\Component\HttpFoundation\Response;
 
@@ -822,7 +830,7 @@ final class PlatformTransportPolicyProvider implements TransportPolicyProviderIn
     public function outcome(ErrorCodeInterface $code): TransportOutcome
     {
         // INTERNAL fallback
-        return new TransportOutcome(Response::HTTP_INTERNAL_SERVER_ERROR, 1, 13);
+        return new TransportOutcome(Response::HTTP_INTERNAL_SERVER_ERROR, 1, GrpcStatus::INTERNAL);
     }
 }
 ```
@@ -959,11 +967,15 @@ final class HttpErrorPresenter implements ErrorPresenterInterface
         // Translation is a boundary service (framework i18n), not domain logic.
         $message = __($dto->messageKey, $dto->messageParams);
 
+        $meta = $dto->meta;
+        $isList = array_keys($meta) === range(0, count($meta) - 1);
+        $metaPayload = $isList ? ['data' => $meta] : $meta;
+
         $error = [
             'response_code' => $dto->responseCode(),
             'log_level' => $dto->logLevel,
             'message' => $message,
-            'meta' => (object) $dto->meta,
+            'meta' => (object) $metaPayload,
             'correlation_id' => $dto->correlationId,
         ];
 
@@ -1065,7 +1077,7 @@ final class CliErrorPresenter implements ErrorPresenterInterface
     /**
      * @return int Exit code
      */
-    public function present(ErrorDto $dto): int
+public function present(ErrorDto $dto): int
     {
         // Translation is a boundary service (framework i18n), not domain logic.
         $message = __($dto->messageKey, $dto->messageParams);
@@ -1106,7 +1118,7 @@ final class GrpcErrorPresenter implements ErrorPresenterInterface
     public function present(ErrorDto $dto): array
     {
         return [
-            'status' => app(TransportPolicyInterface::class)->outcome($dto->code)->grpcStatus,
+            'status' => app(TransportPolicyInterface::class)->outcome($dto->code)->grpcStatus->value,
             // Translation is a boundary service (framework i18n), not domain logic.
             'message' => __($dto->messageKey, $dto->messageParams),
             'metadata' => [
@@ -1121,7 +1133,7 @@ final class GrpcErrorPresenter implements ErrorPresenterInterface
 
 ## Laravel Implementation (Reference)
 
-Laravel integrates this architecture through the exception handler (`ExceptionDriven\\Exceptions\\Handler`) plus container wiring via a Service Provider.
+Laravel integrates this architecture through the exception handler (`ExceptionDriven\Exceptions\Handler`) plus container wiring via a Service Provider.
 
 ### Wiring (service container)
 
@@ -1175,14 +1187,14 @@ final class ErrorHandlingServiceProvider extends ServiceProvider
 }
 ```
 
-Note: examples use the real namespaces from this repo (`ExceptionDriven\\...`).
+Note: examples use the real namespaces from this repo (`ExceptionDriven\...`).
 
 ### Using Laravel’s default Handler
 
 Keep the framework handler and register both the HTTP renderable and the console renderer. The handler is the boundary that:
 
 * normalizes any `Throwable` via the ErrorAdapter
-* computes an `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates one and passes it into the adapter
+* computes a `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates one and passes it into the adapter
 * logs using Laravel’s logger
 * for HTTP: selects the correct presenter via a strategy (resolver)
 * for CLI: uses the CLI presenter in `renderForConsole`
@@ -1368,7 +1380,7 @@ public function test_registry_fallback_for_unmapped_code(): void
 
 HTTP presenter:
 
-* Uses policy map for status.
+* Uses policy registry for status.
 * Payload contains `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.correlation_id`.
 * Must not leak stack traces; must not depend on translated messages in tests.
 

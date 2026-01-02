@@ -6,7 +6,7 @@ namespace ExceptionDriven\Presentation;
 use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class GrpcErrorPresenter implements ErrorPresenterInterface
+final class GrpcErrorPresenter implements GrpcErrorPresenterInterface
 {
     /**
      * Example return type: an array describing gRPC status + metadata.
@@ -17,7 +17,7 @@ final class GrpcErrorPresenter implements ErrorPresenterInterface
     public function present(ErrorDto $dto): array
     {
         return [
-            'status' => app(TransportPolicyInterface::class)->outcome($dto->code)->grpcStatus,
+            'status' => app(TransportPolicyInterface::class)->outcome($dto->code)->grpcStatus->value,
             // Translation is a boundary service (framework i18n), not domain logic.
             'message' => __($dto->messageKey, $dto->messageParams),
             'metadata' => [

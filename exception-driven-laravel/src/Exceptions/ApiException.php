@@ -9,6 +9,10 @@ use Psr\Log\LogLevel;
 
 abstract class ApiException extends Exception implements ApiExceptionInterface
 {
+    public function __construct()
+    {
+        parent::__construct(static::code()->responseCode());
+    }
     /**
      * Each exception must map to a domain-owned error code.
      */
@@ -57,5 +61,20 @@ abstract class ApiException extends Exception implements ApiExceptionInterface
     public function publicMeta(): array
     {
         return [];
+    }
+
+    public function category(): string
+    {
+        return 'internal';
+    }
+
+    public function retryable(): bool
+    {
+        return false;
+    }
+
+    public function isExpected(): bool
+    {
+        return false;
     }
 }

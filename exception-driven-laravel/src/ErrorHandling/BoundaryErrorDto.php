@@ -21,6 +21,9 @@ final class BoundaryErrorDto
         public readonly array $meta = [],
         public readonly array $logContext = [],
         public readonly string $correlationId = '',
+        public readonly string $category = 'internal',
+        public readonly bool $retryable = false,
+        public readonly bool $isExpected = false,
     ) {}
 
     public function responseCode(): string
@@ -44,6 +47,9 @@ final class BoundaryErrorDto
             'message_params' => $this->messageParams,
             'meta' => $this->meta,
             'correlation_id' => $this->correlationId,
+            'category' => $this->category,
+            'retryable' => $this->retryable,
+            'is_expected' => $this->isExpected,
             'context' => $this->logContext,
         ];
     }

@@ -8,6 +8,7 @@ use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 use ExceptionDriven\Policy\TransportOutcome;
 use ExceptionDriven\Policy\TransportPolicyProviderInterface;
 use Symfony\Component\HttpFoundation\Response;
+use ExceptionDriven\Policy\GrpcStatus;
 
 final class UserTransportPolicyProvider implements TransportPolicyProviderInterface
 {
@@ -20,9 +21,8 @@ final class UserTransportPolicyProvider implements TransportPolicyProviderInterf
     {
         /** @var UserErrorCode $code */
         return match ($code) {
-            UserErrorCode::USER_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, 5),
-            UserErrorCode::EMAIL_ALREADY_TAKEN => new TransportOutcome(Response::HTTP_CONFLICT, 1, 6),
+            UserErrorCode::USER_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, GrpcStatus::NOT_FOUND),
+            UserErrorCode::EMAIL_ALREADY_TAKEN => new TransportOutcome(Response::HTTP_CONFLICT, 1, GrpcStatus::ALREADY_EXISTS),
         };
     }
 }
-

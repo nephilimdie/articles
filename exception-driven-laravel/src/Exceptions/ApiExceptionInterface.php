@@ -35,4 +35,13 @@ interface ApiExceptionInterface extends Throwable
      * @return array<string,mixed>
      */
     public function publicMeta(): array;
+
+    /** Semantic category (validation, auth, not_found, conflict, rate_limit, internal, dependency). */
+    public function category(): string;
+
+    /** Whether the operation can be retried (without changing inputs). */
+    public function retryable(): bool;
+
+    /** Whether this failure is expected in normal operation (e.g., validation). */
+    public function isExpected(): bool;
 }

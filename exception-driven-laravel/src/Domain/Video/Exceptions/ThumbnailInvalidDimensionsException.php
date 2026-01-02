@@ -16,7 +16,7 @@ final class ThumbnailInvalidDimensionsException extends ApiException
         private int $width,
         private int $height
     ) {
-        parent::__construct('Invalid thumbnail dimensions');
+        parent::__construct();
     }
 
     public static function code(): ErrorCodeInterface
@@ -27,5 +27,15 @@ final class ThumbnailInvalidDimensionsException extends ApiException
     public function publicMeta(): array
     {
         return ['width' => $this->width, 'height' => $this->height];
+    }
+
+    public function category(): string
+    {
+        return 'validation';
+    }
+
+    public function isExpected(): bool
+    {
+        return true;
     }
 }

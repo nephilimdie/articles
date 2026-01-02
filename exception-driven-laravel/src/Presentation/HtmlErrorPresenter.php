@@ -7,7 +7,7 @@ use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 use Illuminate\Http\Response;
 
-final class HtmlErrorPresenter implements ErrorPresenterInterface
+final class HtmlErrorPresenter implements HtmlErrorPresenterInterface
 {
     public function present(ErrorDto $dto): Response
     {

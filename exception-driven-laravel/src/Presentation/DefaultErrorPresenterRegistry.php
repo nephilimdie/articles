@@ -14,7 +14,7 @@ final class DefaultErrorPresenterRegistry implements ErrorPresenterRegistryInter
         private readonly GrpcErrorPresenter $grpc,
     ) {}
 
-    public function resolveForHttp(Request $request): ErrorPresenterInterface
+    public function resolveForHttp(Request $request): HttpErrorPresenterInterface
     {
         $accept = (string) $request->headers->get('Accept', '');
         if (stripos($accept, 'application/json') !== false) {

@@ -14,7 +14,7 @@ final class UserNotFoundException extends ApiException
 
     public function __construct(private string $userId)
     {
-        parent::__construct('User not found');
+        parent::__construct();
     }
 
     public static function code(): ErrorCodeInterface
@@ -26,5 +26,14 @@ final class UserNotFoundException extends ApiException
     {
         return ['user_id' => $this->userId];
     }
-}
 
+    public function category(): string
+    {
+        return 'not_found';
+    }
+
+    public function isExpected(): bool
+    {
+        return true;
+    }
+}
