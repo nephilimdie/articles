@@ -28,6 +28,6 @@ final class HttpErrorPresenter implements ErrorPresenterInterface
         return new JsonResponse([
             'success' => false,
             'error' => $error,
-        ], app(TransportPolicyInterface::class)->httpStatus($dto->code));
+        ], app(TransportPolicyInterface::class)->outcome($dto->code)->httpStatus);
     }
 }

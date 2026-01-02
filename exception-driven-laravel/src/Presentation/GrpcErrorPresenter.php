@@ -17,7 +17,7 @@ final class GrpcErrorPresenter implements ErrorPresenterInterface
     public function present(ErrorDto $dto): array
     {
         return [
-            'status' => app(TransportPolicyInterface::class)->grpcStatus($dto->code),
+            'status' => app(TransportPolicyInterface::class)->outcome($dto->code)->grpcStatus,
             // Translation is a boundary service (framework i18n), not domain logic.
             'message' => __($dto->messageKey, $dto->messageParams),
             'metadata' => [

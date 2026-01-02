@@ -23,6 +23,6 @@ final class CliErrorPresenter implements ErrorPresenterInterface
             fwrite(STDERR, json_encode(['meta' => $dto->meta], JSON_UNESCAPED_SLASHES) . "\n");
         }
 
-        return app(TransportPolicyInterface::class)->cliExitCode($dto->code);
+        return app(TransportPolicyInterface::class)->outcome($dto->code)->cliExitCode;
     }
 }

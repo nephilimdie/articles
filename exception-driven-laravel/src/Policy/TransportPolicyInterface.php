@@ -7,8 +7,6 @@ use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 
 interface TransportPolicyInterface
 {
-    public function httpStatus(ErrorCodeInterface $code): int;
-    public function cliExitCode(ErrorCodeInterface $code): int;
-    public function grpcStatus(ErrorCodeInterface $code): int;
+    /** Resolve all outcomes for a given error code. */
+    public function outcome(ErrorCodeInterface $code): TransportOutcome;
 }
-

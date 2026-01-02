@@ -14,4 +14,5 @@ interface ErrorCodeInterface
      * Translation key used by the boundary.
      */
     public function translationKey(): string;
+
 }

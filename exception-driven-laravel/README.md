@@ -1,41 +1,77 @@
 # Exception-Driven Application Flow in Laravel
 
+## Why this exists (a short story)
+
+In a previous company I hit the classic scaling problem: **every developer interpreted error handling their own way**.
+
+* some controllers returned `success=false` with `200`
+* others threw exceptions
+* others mixed status codes, payload schemas, and logging rules inline
+
+The result was predictable:
+
+* inconsistent API contracts
+* duplicated mappings scattered across the codebase
+* painful incident response (no universal correlation)
+* hard to add new channels (CLI, HTML, gRPC) without rewriting error logic
+
+So the goal became simple and non-negotiable:
+
+* **one stable semantic contract** (`response_code`)
+* **one boundary-owned translation layer** (policy + presentation)
+* **one universal model** that works across transports
+
 ```mermaid
 flowchart TD
-  A["Intent"] --> B["Domain Logic"]
-  B -->|Valid| C["Continue"]
-  B -->|Invalid| D["Semantic Failure"]
-  D --> E["Normalize Meaning"]
-  E --> F["Apply Policy"]
-  F --> G["Log"]
-  F --> H["Present"]
+  U["Client Request (Browser/App/SDK)"] --> R["Routing + Middleware (Laravel Router, Middleware)"]
+
+  %% Happy path (no exception)
+  R --> C["Intent (Controller: VideoController)"]
+  C --> S["Application Orchestration (Service: VideoService)"]
+  S --> G["Domain Rule Check (Guard: VideoGuards::thumbnailIsLargeEnough)"]
+  G -->|OK| OK["Continue (Controller returns success: JsonResponse)"]
+
+  %% Error path (semantic exception)
+  G -->|Violation| X["Semantic Failure (Exception: ThumbnailInvalidDimensionsException)"]
+  X --> P["Propagate (PHP call stack)"]
+  P --> H["Boundary Catch (Laravel Handler: ExceptionDriven\Exceptions\Handler::renderable)"]
+
+  H --> ID["Correlation ID (X-Request-ID / X-Correlation-ID / traceparent / Str::ulid)"]
+  ID --> AD["Normalize Meaning (ErrorAdapter: DefaultErrorAdapter::toDto)"]
+  AD --> DTO["Canonical Error Model (BoundaryErrorDto)"]
+
+  DTO --> POL["Resolve Transport Outcome (TransportPolicy: TransportPolicyRegistry)"]
+  DTO --> LOG["Log (logger()->log + structured context)"]
+
+  POL --> REG["Select Presenter (Registry: DefaultErrorPresenterRegistry)"]
+
+  REG --> JSON["Present JSON (HttpErrorPresenter -> JsonResponse)"]
+  REG --> HTML["Present HTML (HtmlErrorPresenter -> View Response)"]
+  REG --> CLI["Present CLI (CliErrorPresenter -> exit code + STDERR)"]
+  REG --> GRPC["Present gRPC (GrpcErrorPresenter -> status + metadata)"]
 ```
 
-This document is intended for senior backend developers, tech leads, and software architects working with medium-to-large Laravel codebases. It assumes familiarity with modern PHP (>=8.1), OOP, SOLID principles, and layered application architectures.
+## Overview
 
-This document defines:
+* **Audience:** senior backend devs, tech leads, software architects (Laravel, PHP >= 8.1).
+* **Problem:** error-handling becomes inconsistent when controllers/services mix *meaning* with *policy* (status codes, payload shapes, logging, messages).
+* **Goal:** one consistent boundary that translates errors for **HTTP/CLI/gRPC**.
+* **Non-goals:**
 
-* a complete architectural model for error handling
-* strict, non-negotiable rules
-* a reference implementation approach
+  * replace framework docs
+  * enforce DDD on/off
+  * prescribe observability stacks (ELK/OTEL)
 
-covering HTTP APIs, CLI commands, and extensible transports (gRPC, async workers).
+### Core idea
 
-This document does not:
+* **Domain throws meaning** (typed semantic exceptions).
+* **Boundary applies policy** (payload schema, logging, i18n, and transport mapping).
+* **Mappings are owned by domain modules via policy providers (Transport Policy Registry)**, so mappings scale without a gigantic lookup table and remain transport-agnostic.
+* **Clients rely on `response_code`** (stable contract), not on message text.
 
-* replace framework documentation
-* enforce a specific domain style (DDD on/off)
-* describe observability stacks (ELK, OTEL)
+### Example
 
----
-
-## Introduction
-
-This architecture exists to stop a slow, very real failure mode in PHP backends: **every team invents its own error-handling dialect**.
-
-At first it looks harmless. One controller returns arrays, another throws, a third calls `abort()`. Six months later your API contract is a patchwork and the client has to guess what happened.
-
-A concrete example (common in Laravel codebases): a controller that mixes **business meaning** with **policy** (status codes, payload shape, logging, and user-facing messages).
+**Anti-pattern: policy leaks everywhere (arrays / ad-hoc payloads).**
 
 ```php
 <?php
@@ -67,7 +103,7 @@ public function uploadThumbnail(Request $request): JsonResponse
 }
 ```
 
-Now compare with an exception-driven flow:
+**Preferred: controller expresses intent; domain throws semantics; boundary translates.**
 
 ```php
 <?php
@@ -83,40 +119,27 @@ public function uploadThumbnail(Request $request): JsonResponse
 }
 ```
 
-Here the controller stops being an error-policy factory. It expresses intent and delegates meaning to the domain. The boundary (global handler / middleware / subscriber) becomes the **single point** that decides, consistently:
-
-* which transport status to use
-* the exact error payload shape
-* which `response_code` is exposed as contract
-* what and how to log
-* how to translate user-facing messages
-
-One clarification up front: **this is not about using exceptions as a substitute for normal branching.** Exceptions represent abnormal states or boundary outcomes; if the caller can continue meaningfully, don’t throw.
-
-The core idea is pragmatic:
-
-**move all error policy out of core logic and enforce it at the boundary**.
-
-Developers focus on meaning (what is valid, what is not, what must never happen). Everything else—logging, translation, serialization, protocol mapping—is centralized and enforced consistently.
-
 ### Contract
-
-This document specifies an **exception-driven application flow** for PHP backends (Laravel) where semantic failures are expressed as typed exceptions and translated at the boundary into transport-specific responses.
 
 An implementation conforming to this document:
 
 * MUST model abnormal states as **semantic exceptions** (not boolean returns or ad-hoc arrays)
+
 * MUST expose a stable, machine-readable **response_code** as the primary client contract
-* MUST keep transport policy (HTTP status codes, exit codes, gRPC status, messages, logging strategy) **out of domain code**
+
+* MUST keep transport policy (HTTP status, exit codes, gRPC status, messages, logging strategy) **out of domain code**
+
 * MUST normalize any `Throwable` into a canonical **Boundary Error DTO** via an ErrorAdapter
+
 * MUST present errors through a consistent transport payload/schema (HTTP/CLI/gRPC)
+
 * SHOULD translate human-facing messages only at the boundary (i18n), never in domain logic
-* MUST test contracts by asserting `response_code` and status, not translated messages
+
+* MUST test contracts by asserting `response_code` + transport outcome (status/exit/grpc), not translated messages
+
 * `response_code` is the primary machine contract; `log_level` is a secondary semantic classification
 
-Guiding principle:
-
-**the domain throws meaning; the boundary translates meaning**.
+* **Guiding principle:** *the domain throws meaning; the boundary translates meaning*.
 
 ---
 
@@ -171,14 +194,20 @@ Put differently: assertions are for “this must never be false in a valid syste
 
 The domain does not decide:
 
-* HTTP status codes
-* exit codes
-* client messages
-* logging strategies
+* payload schema
+* client message text / translations
+* logging strategy
 
-All policy decisions belong to the application boundary.
+**Transport mapping is applied at the boundary**, but you should avoid a giant per-error lookup table.
 
-**If your domain knows HTTP, you already lost.**
+Instead, each domain exposes a small provider that the boundary composes via a registry.
+
+* domain: owns its own error enum and a provider that maps codes to outcomes
+* boundary: composes providers in a registry; no global mapping table
+
+This keeps the exception-driven engine **agnostic**, the mapping **modular**, and the table **small and stable**.
+
+> If your domain hardcodes HTTP numbers everywhere, you reintroduce coupling and you’ll regret it when you add CLI/gRPC or change policy.
 
 Semantic severity vs logging strategy
 `log_level` is a semantic severity hint attached to the error meaning (PSR-3 level). It classifies how expected/critical the failure is. The boundary may use it for logging and may expose it to clients, but transport-specific decisions remain boundary-owned.
@@ -229,9 +258,15 @@ The core idea is:
 
 * each domain defines its own enum (VideoErrorCode, UserErrorCode, BillingErrorCode, ...)
 * all enums implement a shared interface (`ErrorCodeInterface`)
-* transport mappings (HTTP / CLI / gRPC) are owned by the application boundary via a policy map, not by domain enums
+* each domain provides a small policy provider that returns a transport outcome for its codes
 
-Additionally, define a small, framework-level Platform domain enum for cross-cutting fallbacks (e.g. unexpected runtime errors). This repository uses `PlatformErrorCode` with `INTERNAL_SERVER_ERROR` as the default fallback response_code. The Platform domain is the only allowed cross-cutting enum; all other error codes are domain-scoped.
+This gives you:
+
+* a complete, local list of domain errors (inside `Domain/Video`)
+* no gigantic global mapping table (the registry composes small per-domain providers)
+* the engine stays transport-agnostic
+
+Additionally, keep a small Platform fallback enum for unknown throwables (e.g. `INTERNAL_SERVER_ERROR`).
 
 ### Interface
 
@@ -243,14 +278,10 @@ namespace ExceptionDriven\ErrorHandling;
 
 interface ErrorCodeInterface
 {
-    /**
-     * Stable business identifier (API contract).
-     */
+    /** Stable business identifier (API contract). */
     public function responseCode(): string;
 
-    /**
-     * Translation key used by the boundary.
-     */
+    /** Translation key used by the boundary. */
     public function translationKey(): string;
 }
 ```
@@ -283,35 +314,40 @@ enum VideoErrorCode: string implements ErrorCodeInterface
         };
     }
 
+    // no transport policy concerns here
+
 }
 ```
 
 ### Platform fallback enum
 
-This enum (Platform domain) is used by the ErrorAdapter when an unknown `Throwable` needs to be mapped into a stable contract. Do not use it for domain semantics.
+This enum (Platform domain) is used by the ErrorAdapter when an unknown `Throwable` needs to be mapped into a stable contract.
 
 ```php
 <?php
 declare(strict_types=1);
 
+// ErrorPolicyKey removed: mappings are provided by per-domain providers composed in a registry
+```
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace ExceptionDriven\ErrorHandling;
+
 enum PlatformErrorCode: string implements ErrorCodeInterface
 {
     case INTERNAL_SERVER_ERROR = 'INTERNAL_SERVER_ERROR';
 
-    public function responseCode(): string
-    {
-        return $this->value;
-    }
+    public function responseCode(): string { return $this->value; }
 
     public function translationKey(): string
     {
-        return match ($this) {
-            self::INTERNAL_SERVER_ERROR => 'errors.platform.internal_server_error',
-        };
+        return 'errors.platform.internal_server_error';
     }
 
-    // Transport mappings are owned by the application policy map,
-    // not by domain/system enums.
+    // no transport policy concerns here
 }
 ```
 
@@ -322,11 +358,11 @@ Notes:
 
 ---
 
-## ApiExceptionInterface
+## Semantic Exceptions Contract (Interface + Base)
 
-`ApiExceptionInterface` is the minimal contract required for a semantic exception to participate in this architecture.
-
-The boundary depends on this **interface**, not on a specific base class.
+* **Goal:** let the boundary treat all semantic failures the same way.
+* The boundary depends on **`ApiExceptionInterface`** (not on a concrete base class).
+* **`ApiException`** is a convenience base; the interface is the real contract.
 
 ```php
 <?php
@@ -341,45 +377,19 @@ interface ApiExceptionInterface extends Throwable
 {
     public function codeEnum(): ErrorCodeInterface;
 
-    /**
-     * PSR-3 severity level (e.g. LogLevel::INFO).
-     */
+    /** PSR-3 severity hint (e.g. LogLevel::INFO). */
     public function logLevel(): string;
 
-    /**
-     * Translation placeholders.
-     *
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> */
     public function messageParams(): array;
 
-    /**
-     * Extra structured info for logs (internal).
-     *
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> Internal-only log context */
     public function context(): array;
 
-    /**
-     * Extra structured info safe for clients.
-     *
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> Client-safe metadata */
     public function publicMeta(): array;
 }
 ```
-
----
-
-## ApiException Base Class
-
-`ApiException` is the semantic base class. Concrete exceptions should:
-
-* declare an error code (domain enum)
-* declare the log level (PSR-3)
-* optionally provide structured context and safe public metadata
-
-`ApiException` should *not* contain any transport or presentation behavior.
 
 ```php
 <?php
@@ -387,20 +397,15 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\Exceptions;
 
+use Exception;
 use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 use Psr\Log\LogLevel;
-use Exception;
 
 abstract class ApiException extends Exception implements ApiExceptionInterface
 {
-    /**
-     * Each exception must map to a domain-owned error code.
-     */
+    /** Each semantic exception maps to a domain-owned error code. */
     abstract public static function code(): ErrorCodeInterface;
 
-    /**
-     * PSR-3 severity. Concrete exceptions override via constant.
-     */
     public const LOG_LEVEL = LogLevel::ERROR;
 
     final public function codeEnum(): ErrorCodeInterface
@@ -413,36 +418,11 @@ abstract class ApiException extends Exception implements ApiExceptionInterface
         return static::LOG_LEVEL;
     }
 
-    /**
-     * Translation placeholders.
-     *
-     * @return array<string,mixed>
-     */
-    public function messageParams(): array
-    {
-        return [];
-    }
+    public function messageParams(): array { return []; }
 
+    public function context(): array { return []; }
 
-    /**
-     * Extra structured info for logs (internal).
-     *
-     * @return array<string,mixed>
-     */
-    public function context(): array
-    {
-        return [];
-    }
-
-    /**
-     * Extra structured info safe for clients.
-     *
-     * @return array<string,mixed>
-     */
-    public function publicMeta(): array
-    {
-        return [];
-    }
+    public function publicMeta(): array { return []; }
 }
 ```
 
@@ -693,34 +673,60 @@ final class DefaultErrorAdapter implements ErrorAdapterInterface
 
 ---
 
-## Transport Policy Map
+## Transport Policy Registry (Scalable, Domain-Owned)
 
-The Transport Policy Map is the boundary-owned component responsible for translating a semantic `ErrorCodeInterface` into transport-specific outcomes. It exists to keep transport policy out of domain code while still enforcing a consistent, centralized mapping across HTTP, CLI, gRPC, and other transports.
+The goal is to avoid two extremes:
 
-### Responsibilities
+* a single **global mapping table** (becomes a dumping ground)
+* transport numbers embedded inside domain enums/exceptions (couples domain to HTTP/CLI/gRPC)
 
-The Transport Policy Map:
-- resolves HTTP status for a given `ErrorCodeInterface`
-- resolves CLI exit code for a given `ErrorCodeInterface`
-- resolves gRPC status for a given `ErrorCodeInterface`
-- provides deterministic defaults for unknown/unmapped codes
+Instead, keep mappings **owned by each domain module** via small providers, and compose them at the boundary through a registry.
 
-It does not:
-- define business meaning (`response_code`)
-- translate messages (i18n)
-- decide logging strategy
+### Core idea
 
-### Rules (Non-Negotiable)
+* Each bounded context/domain module exposes a **policy provider** for its own error codes.
+* The boundary composes providers through a registry.
+* If no provider matches, fall back to a Platform default (deterministic behavior).
 
-- The policy map MUST be owned by the application boundary (framework layer).
-- Domain enums MUST NOT contain transport mappings.
-- The policy map MUST define the default mapping for `PlatformErrorCode::INTERNAL_SERVER_ERROR`:
-  - HTTP: 500
-  - CLI: 1
-  - gRPC: INTERNAL (status code 13)
-- If a code is not explicitly mapped, the policy map MUST fall back to the Platform default mapping.
+### TransportOutcome DTO
 
-### Interface (reference)
+```php
+<?php
+declare(strict_types=1);
+
+namespace ExceptionDriven\Policy;
+
+final class TransportOutcome
+{
+    public function __construct(
+        public readonly int $httpStatus,
+        public readonly int $cliExitCode,
+        public readonly int $grpcStatus,
+    ) {}
+}
+```
+
+### Provider interface
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace ExceptionDriven\Policy;
+
+use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
+
+interface TransportPolicyProviderInterface
+{
+    /** Whether this provider owns/matches the given code (usually by enum class). */
+    public function supports(ErrorCodeInterface $code): bool;
+
+    /** Resolve transport outcomes for a code owned by this provider. */
+    public function outcome(ErrorCodeInterface $code): TransportOutcome;
+}
+```
+
+### Registry (boundary composition)
 
 ```php
 <?php
@@ -732,30 +738,115 @@ use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 
 interface TransportPolicyInterface
 {
-    public function httpStatus(ErrorCodeInterface $code): int;
+    public function outcome(ErrorCodeInterface $code): TransportOutcome;
+}
 
-    /**
-     * @return int Exit code
-     */
-    public function cliExitCode(ErrorCodeInterface $code): int;
+final class TransportPolicyRegistry implements TransportPolicyInterface
+{
+    /** @param list<TransportPolicyProviderInterface> $providers */
+    public function __construct(
+        private readonly array $providers,
+        private readonly TransportPolicyProviderInterface $fallback,
+    ) {}
 
-    /**
-     * @return int gRPC status code (e.g. 13 = INTERNAL)
-     */
-    public function grpcStatus(ErrorCodeInterface $code): int;
+    public function outcome(ErrorCodeInterface $code): TransportOutcome
+    {
+        foreach ($this->providers as $provider) {
+            if ($provider->supports($code)) {
+                return $provider->outcome($code);
+            }
+        }
+
+        return $this->fallback->outcome($code);
+    }
 }
 ```
 
-### Notes
+### Example: Video domain provider (lives near Domain/Video)
 
-- The Transport Policy Map is part of the boundary contract: changing a mapping (e.g. 422 → 400) is a contract change and should be covered by boundary/integration tests.
-- Mappings can be implemented using a lookup table keyed by `responseCode()`, by enum class + case, or by explicit rule objects—implementation details are flexible as long as the rules above remain true.
+Note: import Symfony HTTP constants with `use Symfony\Component\HttpFoundation\Response;`.
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace ExceptionDriven\Domain\Video\Policy;
+
+use ExceptionDriven\Domain\Video\VideoErrorCode;
+use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
+use ExceptionDriven\Policy\TransportOutcome;
+use ExceptionDriven\Policy\TransportPolicyProviderInterface;
+
+use Symfony\Component\HttpFoundation\Response;
+
+final class VideoTransportPolicyProvider implements TransportPolicyProviderInterface
+{
+    public function supports(ErrorCodeInterface $code): bool
+    {
+        return $code instanceof VideoErrorCode;
+    }
+
+    public function outcome(ErrorCodeInterface $code): TransportOutcome
+    {
+        /** @var VideoErrorCode $code */
+        return match ($code) {
+            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(Response::HTTP_UNPROCESSABLE_ENTITY, 1, 3),
+            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, 5),
+        };
+    }
+}
+```
+
+### Platform fallback provider (default)
+
+Note: import Symfony HTTP constants with `use Symfony\Component\HttpFoundation\Response;`.
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace ExceptionDriven\Policy;
+
+use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
+use ExceptionDriven\ErrorHandling\PlatformErrorCode;
+
+use Symfony\Component\HttpFoundation\Response;
+
+final class PlatformTransportPolicyProvider implements TransportPolicyProviderInterface
+{
+    public function supports(ErrorCodeInterface $code): bool
+    {
+        return $code instanceof PlatformErrorCode;
+    }
+
+    public function outcome(ErrorCodeInterface $code): TransportOutcome
+    {
+        // INTERNAL fallback
+        return new TransportOutcome(Response::HTTP_INTERNAL_SERVER_ERROR, 1, 13);
+    }
+}
+```
+
+### Presenter usage
+
+Presenters should resolve outcomes once and then pick the transport-specific value:
+
+```php
+$outcome = app(TransportPolicyInterface::class)->outcome($dto->code);
+$status = $outcome->httpStatus;
+```
+
+This scales because:
+
+* no global enum grows with the organization
+* each domain owns its mapping (in the same module/folder as its error codes)
+* the engine remains agnostic
 
 ---
 
 ## Presenters
 
-Presenters adapt a `BoundaryErrorDto` to a specific transport and format. They use an application-level Transport Policy Map to resolve transport-specific details (HTTP status, CLI exit code, gRPC status).
+Presenters adapt a `BoundaryErrorDto` to a specific transport and format. They use an application-level Transport Policy Registry to resolve transport-specific details (HTTP status, CLI exit code, gRPC status).
 
 They:
 
@@ -793,7 +884,7 @@ interface ErrorPresenterInterface
 
 ### Presenter registry (by transport)
 
-Per rendere plug-and-play nuovi canali (HTTP, HTML, CLI, gRPC, …) usa un enum di trasporto e un registry centralizzato.
+To make new channels plug-and-play (HTTP, HTML, CLI, gRPC, …), use a transport enum and a centralized presenter registry.
 
 ```php
 <?php
@@ -879,7 +970,7 @@ final class HttpErrorPresenter implements ErrorPresenterInterface
         return new JsonResponse([
             'success' => false,
             'error' => $error,
-        ], app(TransportPolicyInterface::class)->httpStatus($dto->code));
+        ], app(TransportPolicyInterface::class)->outcome($dto->code)->httpStatus);
     }
 }
 ```
@@ -910,11 +1001,13 @@ final class HtmlErrorPresenter implements ErrorPresenterInterface
             'message' => $message,
             'meta' => $dto->meta,
             'correlation_id' => $dto->correlationId,
-        ], app(TransportPolicyInterface::class)->httpStatus($dto->code));
+        ], app(TransportPolicyInterface::class)->outcome($dto->code)->httpStatus);
     }
 }
 ```
+
 ### Security note (meta in HTML)
+
 meta is client-safe by definition, but it is not automatically user-displayable. In HTML/Blade responses you SHOULD avoid rendering meta entirely (prefer showing only correlation_id + a generic message).
 If you decide to show any meta fields, you MUST escape output (never render raw/unescaped values) and you SHOULD restrict to an explicit allowlist of fields intended for end-users. Never include stack traces, SQL, internal identifiers, or free-form strings that may contain user-controlled content.
 
@@ -949,10 +1042,10 @@ $this->renderable(function (Throwable $e, $request) {
 
 This is not the Template Method pattern; it’s a simple Presenter/Adapter at the boundary that formats the same DTO into different transports (JSON/HTML/CLI/gRPC).
 
-Nota: per l’integrazione in Laravel, vedi:
-- [Presenters](#presenters)
-- [HTML/Blade presenter](#htmlblade-presenter) (include lo snippet per l’Handler Laravel)
+Note: for Laravel integration, see:
 
+* [Presenters](#presenters)
+* [HTML/Blade presenter](#htmlblade-presenter) (includes the snippet for the Laravel Handler)
 
 ### CLI presenter
 
@@ -984,15 +1077,14 @@ final class CliErrorPresenter implements ErrorPresenterInterface
             fwrite(STDERR, json_encode(['meta' => $dto->meta], JSON_UNESCAPED_SLASHES) . "\n");
         }
 
-        return app(TransportPolicyInterface::class)->cliExitCode($dto->code);
+        return app(TransportPolicyInterface::class)->outcome($dto->code)->cliExitCode;
     }
 }
 ```
 
-
 ### gRPC presenter (conceptual)
 
-**gRPC presenter (concettuale)**
+**gRPC presenter (conceptual)**
 
 ```php
 <?php
@@ -1014,7 +1106,7 @@ final class GrpcErrorPresenter implements ErrorPresenterInterface
     public function present(ErrorDto $dto): array
     {
         return [
-            'status' => app(TransportPolicyInterface::class)->grpcStatus($dto->code),
+            'status' => app(TransportPolicyInterface::class)->outcome($dto->code)->grpcStatus,
             // Translation is a boundary service (framework i18n), not domain logic.
             'message' => __($dto->messageKey, $dto->messageParams),
             'metadata' => [
@@ -1026,7 +1118,6 @@ final class GrpcErrorPresenter implements ErrorPresenterInterface
     }
 }
 ```
-
 
 ## Laravel Implementation (Reference)
 
@@ -1040,26 +1131,40 @@ Register the core components in a dedicated Service Provider.
 <?php
 declare(strict_types=1);
 
-namespace ExceptionDriven\\Providers;
+namespace ExceptionDriven\Providers;
 
-use ExceptionDriven\\ErrorHandling\\DefaultErrorAdapter;
-use ExceptionDriven\\ErrorHandling\\ErrorAdapterInterface;
-use ExceptionDriven\\Policy\\DefaultTransportPolicy;
-use ExceptionDriven\\Policy\\TransportPolicyInterface;
-use ExceptionDriven\\Presentation\\CliErrorPresenter;
-use ExceptionDriven\\Presentation\\DefaultErrorPresenterRegistry;
-use ExceptionDriven\\Presentation\\ErrorPresenterRegistryInterface;
-use ExceptionDriven\\Presentation\\GrpcErrorPresenter;
-use ExceptionDriven\\Presentation\\HtmlErrorPresenter;
-use ExceptionDriven\\Presentation\\HttpErrorPresenter;
-use Illuminate\\Support\\ServiceProvider;
+use ExceptionDriven\ErrorHandling\DefaultErrorAdapter;
+use ExceptionDriven\ErrorHandling\ErrorAdapterInterface;
+use ExceptionDriven\Policy\TransportPolicyInterface;
+use ExceptionDriven\Policy\PlatformTransportPolicyProvider;
+use ExceptionDriven\Policy\TransportPolicyRegistry;
+use ExceptionDriven\Domain\Video\Policy\VideoTransportPolicyProvider;
+use ExceptionDriven\Presentation\CliErrorPresenter;
+use ExceptionDriven\Presentation\DefaultErrorPresenterRegistry;
+use ExceptionDriven\Presentation\ErrorPresenterRegistryInterface;
+use ExceptionDriven\Presentation\GrpcErrorPresenter;
+use ExceptionDriven\Presentation\HtmlErrorPresenter;
+use ExceptionDriven\Presentation\HttpErrorPresenter;
+use Illuminate\Support\ServiceProvider;
 
 final class ErrorHandlingServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
         $this->app->singleton(ErrorAdapterInterface::class, DefaultErrorAdapter::class);
-        $this->app->singleton(TransportPolicyInterface::class, DefaultTransportPolicy::class);
+        // Transport policy registry with domain providers and platform fallback
+        $this->app->singleton(VideoTransportPolicyProvider::class);
+        $this->app->singleton(PlatformTransportPolicyProvider::class);
+
+        $this->app->singleton(TransportPolicyInterface::class, function ($app) {
+            return new TransportPolicyRegistry(
+                providers: [
+                    $app->make(VideoTransportPolicyProvider::class),
+                    // register more domain providers here (User, Billing, ...)
+                ],
+                fallback: $app->make(PlatformTransportPolicyProvider::class),
+            );
+        });
 
         $this->app->singleton(HttpErrorPresenter::class);
         $this->app->singleton(HtmlErrorPresenter::class);
@@ -1076,11 +1181,11 @@ Note: examples use the real namespaces from this repo (`ExceptionDriven\\...`).
 
 Keep the framework handler and register both the HTTP renderable and the console renderer. The handler is the boundary that:
 
-- normalizes any `Throwable` via the ErrorAdapter
-- computes an `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates one and passes it into the adapter
-- logs using Laravel’s logger
-- for HTTP: selects the correct presenter via a strategy (resolver)
-- for CLI: uses the CLI presenter in `renderForConsole`
+* normalizes any `Throwable` via the ErrorAdapter
+* computes an `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates one and passes it into the adapter
+* logs using Laravel’s logger
+* for HTTP: selects the correct presenter via a strategy (resolver)
+* for CLI: uses the CLI presenter in `renderForConsole`
 
 Console exception rendering hooks differ between Laravel versions. The intent remains: compute correlation_id, normalize via adapter, log, then delegate to the CLI presenter.
 
@@ -1088,13 +1193,13 @@ Console exception rendering hooks differ between Laravel versions. The intent re
 <?php
 declare(strict_types=1);
 
-namespace ExceptionDriven\\Exceptions;
+namespace ExceptionDriven\Exceptions;
 
-use ExceptionDriven\\ErrorHandling\\ErrorAdapterInterface;
-use ExceptionDriven\\Presentation\\ErrorPresenterRegistryInterface;
-use ExceptionDriven\\Presentation\\Transport;
-use Illuminate\\Foundation\\Exceptions\\Handler as ExceptionHandler;
-use Illuminate\\Support\\Str;
+use ExceptionDriven\ErrorHandling\ErrorAdapterInterface;
+use ExceptionDriven\Presentation\ErrorPresenterRegistryInterface;
+use ExceptionDriven\Presentation\Transport;
+use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
+use Illuminate\Support\Str;
 use Throwable;
 
 final class Handler extends ExceptionHandler
@@ -1155,8 +1260,8 @@ Minimum expectations:
 
 To make incidents diagnosable in minutes instead of hours:
 
-- Pick `correlation_id` from `X-Request-ID`/`X-Correlation-ID`/`traceparent` if present; otherwise generate a ULID/UUID at the boundary for every error.
-- Log the `correlation_id` and return it to clients (JSON/HTML/CLI/gRPC) so support can correlate reports with logs.
+* Pick `correlation_id` from `X-Request-ID`/`X-Correlation-ID`/`traceparent` if present; otherwise generate a ULID/UUID at the boundary for every error.
+* Log the `correlation_id` and return it to clients (JSON/HTML/CLI/gRPC) so support can correlate reports with logs.
 
 ---
 
@@ -1202,8 +1307,8 @@ Tests are split by layer and responsibility. Do not assert translated messages; 
 
 ### Domain tests
 
-- Assert which exception class is thrown and, optionally, its `codeEnum()` value and semantics.
-- Do not involve transport or presenters.
+* Assert which exception class is thrown and, optionally, its `codeEnum()` value and semantics.
+* Do not involve transport or presenters.
 
 ```php
 public function test_thumbnail_too_small_throws_exception(): void
@@ -1226,63 +1331,70 @@ public function test_thumbnail_exception_exposes_video_error_code(): void
 
 ### Adapter tests
 
-- Given an `ApiExceptionInterface`, `DefaultErrorAdapter::toDto()` preserves `code`, `messageKey`, `messageParams`, `logLevel`, `meta`, `context` and uses the provided `correlation_id`.
-- Given an unknown `Throwable`, maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` and uses the provided `correlation_id` (the adapter does not generate IDs).
+* Given an `ApiExceptionInterface`, `DefaultErrorAdapter::toDto()` preserves `code`, `messageKey`, `messageParams`, `logLevel`, `meta`, `context` and uses the provided `correlation_id`.
+* Given an unknown `Throwable`, maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` and uses the provided `correlation_id` (the adapter does not generate IDs).
 
 ### Handler boundary tests
 
-- The Handler derives `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates a ULID/UUID.
-- The DTO remains immutable and contains the `correlation_id`; `logContext` includes `correlation_id`.
+* The Handler derives `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates a ULID/UUID.
+* The DTO remains immutable and contains the `correlation_id`; `logContext` includes `correlation_id`.
 
-### Transport Policy Map tests
+### Transport Policy Registry tests
 
-- Known codes map as expected (e.g., `VIDEO_THUMBNAIL_INVALID_DIMENSIONS` → HTTP 422).
-- Unmapped codes fall back: HTTP 500, CLI 1, gRPC 13 (INTERNAL).
-- Optionally assert a warning is logged for unmapped codes by injecting a mock `LoggerInterface`.
+* Known codes map as expected (e.g., `VIDEO_THUMBNAIL_INVALID_DIMENSIONS` → HTTP 422).
+* Unmapped codes fall back: HTTP 500, CLI 1, gRPC 13 (INTERNAL).
+* Optionally assert a warning is logged for unmapped codes by injecting a mock `LoggerInterface`.
 
 ```php
-public function test_policy_fallback_for_unmapped_code(): void
+public function test_registry_fallback_for_unmapped_code(): void
 {
-    $policy = new DefaultTransportPolicy($logger = $this->createMock(\Psr\Log\LoggerInterface::class));
+    $policy = new TransportPolicyRegistry(
+        providers: [new VideoTransportPolicyProvider()],
+        fallback: new PlatformTransportPolicyProvider(),
+    );
     $code = new class implements ErrorCodeInterface {
         public function responseCode(): string { return 'SOMETHING_NEW'; }
         public function translationKey(): string { return 'noop'; }
     };
 
-    $logger->expects($this->atLeastOnce())->method('warning');
-
-    $this->assertSame(500, $policy->httpStatus($code));
-    $this->assertSame(1, $policy->cliExitCode($code));
-    $this->assertSame(13, $policy->grpcStatus($code));
+    $outcome = $policy->outcome($code); // falls back to platform provider
+    $this->assertSame(500, $outcome->httpStatus);
+    $this->assertSame(1, $outcome->cliExitCode);
+    $this->assertSame(13, $outcome->grpcStatus);
 }
 ```
 
 ### Presenter tests
 
 HTTP presenter:
-- Uses policy map for status.
-- Payload contains `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.correlation_id`.
-- Must not leak stack traces; must not depend on translated messages in tests.
+
+* Uses policy map for status.
+* Payload contains `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.correlation_id`.
+* Must not leak stack traces; must not depend on translated messages in tests.
 
 CLI presenter:
-- Exit code from policy; prints `response_code`, `correlation_id`.
+
+* Exit code from policy; prints `response_code`, `correlation_id`.
 
 gRPC presenter (if applicable):
-- Status from policy; metadata contains `response_code`, `log_level`, `correlation_id`.
+
+* Status from policy; metadata contains `response_code`, `log_level`, `correlation_id`.
 
 ### HTTP boundary (integration)
 
-- Trigger a controller/action that throws a semantic exception; assert:
-  - HTTP status matches policy for that `response_code`.
-  - Payload contains `response_code`, `log_level`, `correlation_id` (non-empty).
-  - Do not assert translated messages.
+* Trigger a controller/action that throws a semantic exception; assert:
+
+  * HTTP status matches policy for that `response_code`.
+  * Payload contains `response_code`, `log_level`, `correlation_id` (non-empty).
+  * Do not assert translated messages.
 
 ### Fallback behavior
 
-- Force an unknown `Throwable` (e.g., throw \RuntimeException) and assert:
-  - Adapter maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` (check `response_code`).
-  - Policy applies default mapping (HTTP 500; CLI 1; gRPC 13).
-  - `correlation_id` is taken from headers if present or generated.
+* Force an unknown `Throwable` (e.g., throw \RuntimeException) and assert:
+
+  * Adapter maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` (check `response_code`).
+  * Policy applies default mapping (HTTP 500; CLI 1; gRPC 13).
+  * `correlation_id` is taken from headers if present or generated.
 
 ---
 
@@ -1297,6 +1409,16 @@ exception-driven-laravel/
         VideoErrorCode.php
         Exceptions/
           ThumbnailInvalidDimensionsException.php
+        Policy/
+          VideoTransportPolicyProvider.php
+      User/
+        UserGuards.php
+        UserErrorCode.php
+        Exceptions/
+          EmailAlreadyTakenException.php
+          UserNotFoundException.php
+        Policy/
+          UserTransportPolicyProvider.php
     ErrorHandling/
       DefaultErrorAdapter.php
       ErrorAdapterInterface.php
@@ -1311,8 +1433,11 @@ exception-driven-laravel/
       Controllers/
         VideoController.php
     Policy/
-      DefaultTransportPolicy.php
-      TransportPolicyInterface.php
+      TransportOutcome.php
+      TransportPolicyInterface.php        (outcome)
+      TransportPolicyProviderInterface.php
+      TransportPolicyRegistry.php
+      PlatformTransportPolicyProvider.php
     Presentation/
       ErrorPresenterInterface.php
       ErrorPresenterRegistryInterface.php
@@ -1321,11 +1446,10 @@ exception-driven-laravel/
       HttpErrorPresenter.php
       CliErrorPresenter.php
       GrpcErrorPresenter.php
+      HtmlErrorPresenter.php
     Providers/
       ErrorHandlingServiceProvider.php
 ```
-
-
 
 ## Anti-Patterns
 

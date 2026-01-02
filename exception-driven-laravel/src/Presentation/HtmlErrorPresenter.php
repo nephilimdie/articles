@@ -19,6 +19,6 @@ final class HtmlErrorPresenter implements ErrorPresenterInterface
             'message' => $message,
             'meta' => $dto->meta,
             'correlation_id' => $dto->correlationId,
-        ], app(TransportPolicyInterface::class)->httpStatus($dto->code));
+        ], app(TransportPolicyInterface::class)->outcome($dto->code)->httpStatus);
     }
 }
