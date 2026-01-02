@@ -101,6 +101,48 @@ public function uploadThumbnail(Request $request): JsonResponse
 }
 ```
 
+## Outcomes Cheat Sheet (examples)
+
+Quick reference of response_code → HTTP/CLI/gRPC outcomes resolved by providers/registry. Adjust per your domain/policy.
+
+| response_code                         | HTTP | CLI | gRPC                  |
+|---------------------------------------|------|-----|-----------------------|
+| UNAUTHENTICATED                       | 401  | 1   | UNAUTHENTICATED (16)  |
+| FORBIDDEN                             | 403  | 1   | PERMISSION_DENIED (7) |
+| VALIDATION_FAILED                     | 422  | 1   | INVALID_ARGUMENT (3)  |
+| NOT_FOUND                             | 404  | 1   | NOT_FOUND (5)         |
+| VIDEO_THUMBNAIL_INVALID_DIMENSIONS    | 422  | 1   | INVALID_ARGUMENT (3)  |
+
+Note: domain-specific codes (e.g., `VIDEO_THUMBNAIL_INVALID_DIMENSIONS`) map via their own provider. For example, the Video provider returns HTTP 422, CLI 1, gRPC INVALID_ARGUMENT (3).
+
+## FAQ / Gotchas
+
+- ValidationException (Illuminate\Validation\ValidationException)
+  - Adapter maps to `VALIDATION_FAILED` → HTTP 422, gRPC INVALID_ARGUMENT (3)
+  - Expected error; keep domain free of transport logic
+
+- AuthorizationException vs AuthenticationException
+  - AuthorizationException (Illuminate\Auth\Access\AuthorizationException) → `FORBIDDEN` (403), gRPC PERMISSION_DENIED (7)
+  - AuthenticationException (Illuminate\Auth\AuthenticationException) → `UNAUTHENTICATED` (401), gRPC UNAUTHENTICATED (16)
+  - Don’t conflate 401 vs 403 semantics
+
+- ModelNotFoundException (Illuminate\Database\Eloquent\ModelNotFoundException)
+  - Adapter maps to `NOT_FOUND` → HTTP 404, gRPC NOT_FOUND (5)
+
+- HttpExceptionInterface (Symfony\Component\HttpKernel\Exception)
+  - Adapter maps known statuses (401/403/404/422) to dedicated platform codes
+  - Other statuses fall back to INTERNAL_SERVER_ERROR (500) unless you add explicit codes/providers
+
+- Rate limiting (HTTP 429)
+  - If you expose rate limit semantics, add a platform code (e.g., `RATE_LIMIT`) and map it to HTTP 429 and gRPC RESOURCE_EXHAUSTED (8) in a provider
+  - Keep the domain free of transport numbers; map at the boundary via providers/registry
+
+- correlation_id naming
+  - Keep snake_case in payload (`correlation_id`) and use camelCase internally where idiomatic (e.g., `$dto->correlationId`)
+
+- CLI exit codes
+  - CLI presenter returns an int and writes to STDERR; your command must set the process exit status explicitly if desired (e.g., `return $presenter->present($dto);` from the command)
+
 **Preferred: controller expresses intent; domain throws semantics; boundary translates.**
 
 ```php
