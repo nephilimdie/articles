@@ -6,7 +6,7 @@ namespace ExceptionDriven\Presentation;
 use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class CliErrorPresenter implements CliErrorPresenterInterface
+final class CliErrorPresenter implements ErrorPresenterInterface, CliErrorPresenterInterface
 {
     /**
      * @return int Exit code

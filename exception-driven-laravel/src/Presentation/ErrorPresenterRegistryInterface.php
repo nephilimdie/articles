@@ -12,7 +12,7 @@ interface ErrorPresenterRegistryInterface
     /**
      * Resolve the appropriate HTTP presenter (JSON/HTML) by inspecting the request.
      */
-    public function resolveForHttp(Request $request): HttpErrorPresenterInterface;
+    public function resolveForHttp(Request $request): ErrorPresenterInterface;
 
     /**
      * Return the presenter registered for a given transport.

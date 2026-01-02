@@ -6,7 +6,7 @@ namespace ExceptionDriven\Presentation;
 use ExceptionDriven\ErrorHandling\BoundaryErrorDto as ErrorDto;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class GrpcErrorPresenter implements GrpcErrorPresenterInterface
+final class GrpcErrorPresenter implements ErrorPresenterInterface, GrpcErrorPresenterInterface
 {
     /**
      * Example return type: an array describing gRPC status + metadata.

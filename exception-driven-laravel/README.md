@@ -1,7 +1,5 @@
 # Exception-Driven Application Flow in Laravel
 
-## Why this exists (a short story)
-
 In a previous company I hit the classic scaling problem: **every developer interpreted error handling their own way**.
 
 * some controllers returned `success=false` with `200`
@@ -41,7 +39,7 @@ flowchart TD
   AD --> DTO["Canonical Error Model (BoundaryErrorDto)"]
 
   DTO --> POL["Resolve Transport Outcome (TransportPolicy: TransportPolicyRegistry)"]
-DTO --> LOG["Log (logger()->log + structured context)"]
+  DTO --> LOG["Log (logger()->log + structured context)"]
 
   POL --> REG["Select Presenter (Registry: DefaultErrorPresenterRegistry)"]
 
@@ -336,6 +334,8 @@ declare(strict_types=1);
 
 namespace ExceptionDriven\ErrorHandling;
 
+use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
+
 enum PlatformErrorCode: string implements ErrorCodeInterface
 {
     case INTERNAL_SERVER_ERROR = 'INTERNAL_SERVER_ERROR';
@@ -539,7 +539,6 @@ final class BoundaryErrorDto
         public readonly string $logLevel,
         public readonly array $meta = [],
         public readonly array $logContext = [],
-        public readonly string $correlationId = '',
         public readonly string $correlationId = '',
         public readonly string $category = 'internal',
         public readonly bool $retryable = false,
@@ -1187,6 +1186,12 @@ final class ErrorHandlingServiceProvider extends ServiceProvider
 }
 ```
 
+### Compatibility Notes
+
+- Laravel 9/10/11 share the same core integration points (renderable closures and the exception Handler hooks). The examples use a renderable closure for HTTP and `renderForConsole` for CLI; adapt visibility or signatures only if your version differs.
+- `renderForConsole` prints to STDERR through the CLI presenter and does not set the process exit code. If your command must exit with the policy exit code, capture the integer returned by the presenter from your command and `return $exitCode;` (or call `exit($exitCode);`).
+- For HTTP, choose JSON vs HTML presenter based on the request (Accept header or `expectsJson()`); this works consistently across modern Laravel versions.
+
 Note: examples use the real namespaces from this repo (`ExceptionDriven\...`).
 
 ### Using Laravel’s default Handler
@@ -1249,7 +1254,8 @@ final class Handler extends ExceptionHandler
 
         logger()->log($dto->logLevel, $e->getMessage(), $dto->toArray());
 
-        // CLI rendering; exit code is returned if you want to use it.
+        // CLI rendering: presenter returns an exit code and writes to STDERR.
+        // Handler does not set the process exit status here.
         app(ErrorPresenterRegistryInterface::class)->get(Transport::CLI)->present($dto);
     }
 }
@@ -1372,7 +1378,7 @@ public function test_registry_fallback_for_unmapped_code(): void
     $outcome = $policy->outcome($code); // falls back to platform provider
     $this->assertSame(500, $outcome->httpStatus);
     $this->assertSame(1, $outcome->cliExitCode);
-    $this->assertSame(13, $outcome->grpcStatus);
+    $this->assertSame(13, $outcome->grpcStatus->value);
 }
 ```
 
@@ -1432,10 +1438,10 @@ exception-driven-laravel/
         Policy/
           UserTransportPolicyProvider.php
     ErrorHandling/
+      BoundaryErrorDto.php
       DefaultErrorAdapter.php
       ErrorAdapterInterface.php
       ErrorCodeInterface.php
-      BoundaryErrorDto.php
       PlatformErrorCode.php
     Exceptions/
       ApiException.php
@@ -1445,20 +1451,25 @@ exception-driven-laravel/
       Controllers/
         VideoController.php
     Policy/
+      GrpcStatus.php
+      PlatformTransportPolicyProvider.php
       TransportOutcome.php
-      TransportPolicyInterface.php        (outcome)
+      TransportPolicyInterface.php
       TransportPolicyProviderInterface.php
       TransportPolicyRegistry.php
-      PlatformTransportPolicyProvider.php
     Presentation/
+      CliErrorPresenter.php
+      CliErrorPresenterInterface.php
+      DefaultErrorPresenterRegistry.php
       ErrorPresenterInterface.php
       ErrorPresenterRegistryInterface.php
-      DefaultErrorPresenterRegistry.php
-      Transport.php
-      HttpErrorPresenter.php
-      CliErrorPresenter.php
       GrpcErrorPresenter.php
+      GrpcErrorPresenterInterface.php
       HtmlErrorPresenter.php
+      HtmlErrorPresenterInterface.php
+      HttpErrorPresenter.php
+      HttpErrorPresenterInterface.php
+      Transport.php
     Providers/
       ErrorHandlingServiceProvider.php
 ```

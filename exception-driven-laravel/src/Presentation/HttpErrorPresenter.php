@@ -8,7 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
 use ExceptionDriven\Policy\TransportPolicyInterface;
 
-final class HttpErrorPresenter implements HttpErrorPresenterInterface
+final class HttpErrorPresenter implements ErrorPresenterInterface, HttpErrorPresenterInterface
 {
     public function present(ErrorDto $dto): Response
     {

@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace ExceptionDriven\Domain\Video\Policy;
@@ -21,8 +22,16 @@ final class VideoTransportPolicyProvider implements TransportPolicyProviderInter
     {
         /** @var VideoErrorCode $code */
         return match ($code) {
-            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(Response::HTTP_UNPROCESSABLE_ENTITY, 1, GrpcStatus::INVALID_ARGUMENT),
-            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(Response::HTTP_NOT_FOUND, 1, GrpcStatus::NOT_FOUND),
+            VideoErrorCode::THUMBNAIL_INVALID_DIMENSIONS => new TransportOutcome(
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+                1,
+                GrpcStatus::INVALID_ARGUMENT
+            ),
+            VideoErrorCode::VIDEO_NOT_FOUND => new TransportOutcome(
+                Response::HTTP_NOT_FOUND,
+                1,
+                GrpcStatus::NOT_FOUND
+            ),
         };
     }
 }
