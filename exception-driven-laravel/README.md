@@ -49,7 +49,7 @@ flowchart TD
   REG --> GRPC["Present gRPC (GrpcErrorPresenter -> status + metadata)"]
 ```
 
-## Overview
+## Principles
 
 * **Audience:** senior backend devs, tech leads, software architects (Laravel, PHP >= 8.1).
 * **Problem:** error-handling becomes inconsistent when controllers/services mix *meaning* with *policy* (status codes, payload shapes, logging, messages).
@@ -367,13 +367,6 @@ This enum (Platform domain) is used by the ErrorAdapter when an unknown `Throwab
 <?php
 declare(strict_types=1);
 
-// ErrorPolicyKey removed: mappings are provided by per-domain providers composed in a registry
-```
-
-```php
-<?php
-declare(strict_types=1);
-
 namespace ExceptionDriven\ErrorHandling;
 
 use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
@@ -381,15 +374,23 @@ use ExceptionDriven\ErrorHandling\ErrorCodeInterface;
 enum PlatformErrorCode: string implements ErrorCodeInterface
 {
     case INTERNAL_SERVER_ERROR = 'INTERNAL_SERVER_ERROR';
+    case UNAUTHENTICATED = 'UNAUTHENTICATED';
+    case FORBIDDEN = 'FORBIDDEN';
+    case VALIDATION_FAILED = 'VALIDATION_FAILED';
+    case NOT_FOUND = 'NOT_FOUND';
 
     public function responseCode(): string { return $this->value; }
 
     public function translationKey(): string
     {
-        return 'errors.platform.internal_server_error';
+        return match ($this) {
+            self::INTERNAL_SERVER_ERROR => 'errors.platform.internal_server_error',
+            self::UNAUTHENTICATED => 'errors.platform.unauthenticated',
+            self::FORBIDDEN => 'errors.platform.forbidden',
+            self::VALIDATION_FAILED => 'errors.platform.validation_failed',
+            self::NOT_FOUND => 'errors.platform.not_found',
+        };
     }
-
-    // no transport policy concerns here
 }
 ```
 
@@ -1325,22 +1326,9 @@ To make incidents diagnosable in minutes instead of hours:
 
 ---
 
-## Performance: Cost of Exceptions in PHP
+## Performance (short note)
 
-Exceptions in PHP are **cheap to have** (a `try/catch` on the happy path) but **expensive to throw**.
-
-Rule of thumb:
-
-* keep exceptions for **rare, abnormal** states
-* never use them as normal flow control in hot paths (loops, parsers, validators)
-* if you see high exception volume in production, **profile it**: the cost is often dominated by stack trace capture + logging
-
-(Details and benchmarks moved to a dedicated article.)
-
-References:
-
-* [1] PHP.Watch — “Performance Impact of PHP Exceptions” (2020-09-08)
-* [2] Datadog — “Why care about exception profiling in PHP?”
+Use exceptions for rare, abnormal states; avoid using them for normal control flow on hot paths. Investigate high exception volume in production with profiling.
 
 ---
 
@@ -1363,12 +1351,11 @@ Catching without recovery is forbidden.
 
 ## Testing Strategy
 
-Tests are split by layer and responsibility. Do not assert translated messages; assert contracts: `response_code`, transport status/exit/grpc, `log_level`, and `correlation_id`.
+Focus on contracts, not messages: assert `response_code`, HTTP/CLI/gRPC outcomes, and `correlation_id`.
 
 ### Domain tests
 
-* Assert which exception class is thrown and, optionally, its `codeEnum()` value and semantics.
-* Do not involve transport or presenters.
+Assert the exception class (and optionally its `codeEnum()` value); no transport concerns.
 
 ```php
 public function test_thumbnail_too_small_throws_exception(): void
@@ -1389,21 +1376,11 @@ public function test_thumbnail_exception_exposes_video_error_code(): void
 }
 ```
 
-### Adapter tests
+### Adapter / Handler / Policy
 
-* Given an `ApiExceptionInterface`, `DefaultErrorAdapter::toDto()` preserves `code`, `messageKey`, `messageParams`, `logLevel`, `meta`, `context` and uses the provided `correlation_id`.
-* Given an unknown `Throwable`, maps to `PlatformErrorCode::INTERNAL_SERVER_ERROR` and uses the provided `correlation_id` (the adapter does not generate IDs).
-
-### Handler boundary tests
-
-* The Handler derives `correlation_id` from headers (`X-Request-ID`/`X-Correlation-ID`/`traceparent`) or generates a ULID/UUID.
-* The DTO remains immutable and contains the `correlation_id`; `logContext` includes `correlation_id`.
-
-### Transport Policy Registry tests
-
-* Known codes map as expected (e.g., `VIDEO_THUMBNAIL_INVALID_DIMENSIONS` → HTTP 422).
-* Unmapped codes fall back: HTTP 500, CLI 1, gRPC 13 (INTERNAL).
-* Optionally assert a warning is logged for unmapped codes by injecting a mock `LoggerInterface`.
+- Adapter: given an `ApiExceptionInterface`, `toDto()` preserves fields and uses provided `correlation_id`. Unknown `Throwable` → platform fallback code.
+- Handler: derives or generates `correlation_id`; logs and delegates to presenters.
+- Policy: known codes map as expected; unknown codes fall back (HTTP 500, CLI 1, gRPC 13).
 
 ```php
 public function test_registry_fallback_for_unmapped_code(): void
@@ -1424,21 +1401,9 @@ public function test_registry_fallback_for_unmapped_code(): void
 }
 ```
 
-### Presenter tests
+### Presenter tests (HTTP/CLI/gRPC)
 
-HTTP presenter:
-
-* Uses policy registry for status.
-* Payload contains `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.correlation_id`.
-* Must not leak stack traces; must not depend on translated messages in tests.
-
-CLI presenter:
-
-* Exit code from policy; prints `response_code`, `correlation_id`.
-
-gRPC presenter (if applicable):
-
-* Status from policy; metadata contains `response_code`, `log_level`, `correlation_id`.
+HTTP: assert status from policy; payload has `success=false`, `error.response_code`, `error.log_level`, `error.meta` (object), `error.correlation_id`. CLI: exit code from policy; prints `response_code` and `correlation_id`. gRPC: status from policy; metadata contains `response_code`, `log_level`, `correlation_id`.
 
 ### HTTP boundary (integration)
 
