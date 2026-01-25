@@ -164,6 +164,8 @@ A good split is:
 
 ## The PSR adapter (MQTT message → PSR-7/PSR-17 → internal Laravel request)
 
+![MQTT to Laravel Bridge](./mqtt-laravel-bridge.png)
+
 This is the core: instead of re-implementing auth/validation/policies for MQTT, we adapt the message into an HTTP request *shape* and let Laravel execute the usual HTTP Kernel pipeline.
 
 ### PSR-7 and PSR-17 (not PSR-13)
@@ -200,31 +202,63 @@ Key detail: we inject the JSON as **raw request body** (PSR-7 stream) and set `C
 
 declare(strict_types=1);
 
-use Nyholm\Psr7\ServerRequest;
+use GuzzleHttp\Psr7\HttpFactory;
+use GuzzleHttp\Psr7\ServerRequest;
+use GuzzleHttp\Psr7\Utils;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request as LaravelRequest;
-use Nyholm\Psr7\Factory\Psr17Factory;
-use Nyholm\Psr7\Stream;
 use Psr\Http\Message\ResponseInterface;
 use Symfony\Bridge\PsrHttpMessage\Factory\HttpFoundationFactory;
 use Symfony\Bridge\PsrHttpMessage\Factory\PsrHttpFactory;
 
 final class RequestAdapterService
 {
+    /**
+     * Internal entrypoint used by the adapter.
+     * Keep it explicit and ensure only allowlisted actions/routes
+     * can be reached.
+     */
+    private const SUBSCRIBE_PREFIX = '/subscribe/';
+
     private PsrHttpFactory $psrHttpFactory;
     private HttpFoundationFactory $httpFoundationFactory;
 
+    /**
+     * Build the adapter around Laravel's HTTP Kernel.
+     *
+     * The Kernel is the single entrypoint for the HTTP lifecycle 
+     * (middleware, routing, controllers).
+     * PSR-17 factories are initialized once to avoid re-allocations
+     * per message in a long-running process.
+     *
+     * @param Kernel $kernel Laravel HTTP Kernel.
+     */
     public function __construct(private readonly Kernel $kernel)
     {
-        $psr17 = new Psr17Factory();
+        $psr17 = new HttpFactory();
 
         // PSR-17 factories are used by the Symfony PSR bridge.
         $this->psrHttpFactory = new PsrHttpFactory($psr17, $psr17, $psr17, $psr17);
         $this->httpFoundationFactory = new HttpFoundationFactory();
     }
 
+    /**
+     * Handle a single MQTT message by translating it into an internal
+     * HTTP request.
+     *
+     * Pipeline:
+     * - MQTT JSON envelope -> PSR-7 request
+     * - PSR-7 -> Symfony HttpFoundation -> Laravel Request
+     * - Kernel handle/terminate
+     * - Laravel/Symfony response -> PSR-7 response
+     *
+     * @param string $message Raw MQTT payload (JSON).
+     * @return ResponseInterface PSR-7 produced by the Laravel HTTP pipeline.
+     * @throws \JsonException When the MQTT payload is not valid JSON.
+     */
     public function handleMqttMessage(string $message): ResponseInterface
     {
+        /** @var array<string, mixed> $payload */
         $payload = json_decode($message, true, 512, JSON_THROW_ON_ERROR);
 
         $psrRequest = $this->payloadToPsrRequest($payload);
@@ -240,14 +274,26 @@ final class RequestAdapterService
         return $this->psrHttpFactory->createResponse($response);
     }
 
+    /**
+     * Convert the MQTT envelope into a PSR-7 ServerRequest.
+     * Notes:
+     * - `api` must be an allowlisted action key (or mapped) to avoid 
+     *   arbitrary internal path invocation.
+     * - JSON body is injected as the raw request stream to match real 
+     *   HTTP JSON behavior.
+     *
+     * @param array<string, mixed> $payload Decoded MQTT JSON envelope.
+     * @return ServerRequest PSR-7 request representing the internal call.
+     * @throws \JsonException When encoding the JSON body fails.
+     */
     private function payloadToPsrRequest(array $payload): ServerRequest
     {
         $method = (string) ($payload['method'] ?? 'POST');
         $api = ltrim((string) ($payload['api'] ?? ''), '/');
 
-        // IMPORTANT: treat `api` as a whitelisted action key (or map it) rather than an arbitrary path.
-        // Internal entrypoint. Keep it explicit and whitelisted by routes.
-        $path = '/subscribe/' . $api;
+        // IMPORTANT: treat `api` as a whitelisted action key (or map it) 
+        //  rather than an arbitrary path.
+        $path = self::SUBSCRIBE_PREFIX . $api;
 
         $headers = [
             'Accept' => 'application/json',
@@ -269,11 +315,11 @@ final class RequestAdapterService
             $body,
             JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
         );
-        $stream = Stream::create($json);
 
-        return new ServerRequest($method, $path, $headers, $stream);
+        return new ServerRequest($method, $path, $headers, Utils::streamFor($json));
     }
 }
+
 ```
 
 ### Facade vs service
@@ -295,7 +341,11 @@ These are small touches that make the adapter feel production-grade without bloa
 Example for query support:
 
 ```php
-$path = '/subscribe/' . $api;
+private const SUBSCRIBE_PREFIX = '/subscribe/';
+
+// ...
+
+$path = self::SUBSCRIBE_PREFIX . $api;
 
 if (!empty($payload['query']) && is_array($payload['query'])) {
     $qs = http_build_query($payload['query']);
@@ -327,7 +377,7 @@ You *can* and sometimes you *should*.
 
 ### Rule of thumb
 
-* Keep controllers thin.
+* Keep controllers thin (are you doing different?).
 * Put business logic in services/use-cases.
 * Treat the adapter as a **boundary bridge**, not as your architecture foundation.
 
