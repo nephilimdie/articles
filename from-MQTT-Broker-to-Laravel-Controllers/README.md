@@ -1,5 +1,7 @@
 # From MQTT Broker to Laravel Controllers
 
+![MQTT to Laravel Controller](./mqtt-to-laravel.png)
+
 ## Turning MQTT messages into internal Laravel HTTP requests (pragmatic bridge)
 
 Event-driven systems often need to trigger the **same** business logic from multiple entry points: HTTP, queues, WebSockets—or MQTT.
